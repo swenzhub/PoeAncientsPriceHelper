@@ -43,3 +43,6 @@ WPF (settings window) + WinForms (overlay), Tesseract OCR, .NET 8 (`net8.0-windo
 
 If this tool saves you some alt-tabbing, there's a **☕ Buy me a coffee** button right in the app.
 Thanks!
+
+## Disclaimer for those who seem to be troubled by it.. 
+Yes it was greatly helped by claude :D never the less it works and its free!
