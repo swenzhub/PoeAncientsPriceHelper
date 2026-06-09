@@ -1,5 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -41,9 +43,8 @@ internal sealed class PriceOverlayForm : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         Bounds = screenBounds;
-        BackColor = Color.Black;
-        TransparencyKey = Color.Black;
-        DoubleBuffered = true;
+        // Per-pixel alpha via UpdateLayeredWindow (see RenderLayered) — NOT color-key transparency,
+        // so backdrops can be genuinely semi-transparent. Pixels are pushed manually; WM_PAINT is unused.
     }
 
     protected override CreateParams CreateParams
@@ -67,7 +68,7 @@ internal sealed class PriceOverlayForm : Form
         _panelOpen = panelOpen;
         _reading = reading;
         ApplyVisibility();
-        Invalidate();
+        if (Visible) RenderLayered();
     }
 
     // F3 toggles debug visuals (row boxes, region outline, OCR "?" text). Prices are unaffected.
@@ -77,7 +78,7 @@ internal sealed class PriceOverlayForm : Form
         if (InvokeRequired) { BeginInvoke(ToggleDebug); return; }
         _debug = !_debug;
         ApplyVisibility();
-        Invalidate();
+        if (Visible) RenderLayered();
     }
 
     private void ApplyVisibility()
@@ -97,15 +98,57 @@ internal sealed class PriceOverlayForm : Form
         _panelOpen = false;
         _reading = false;
         ApplyVisibility();
-        Invalidate();
+        if (Visible) RenderLayered();
     }
 
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        base.OnPaint(e);
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
+    // WM_PAINT is unused — pixels come from RenderLayered/UpdateLayeredWindow. Suppress the default
+    // background erase/paint so WinForms never flashes an opaque fill over the layered content.
+    protected override void OnPaintBackground(PaintEventArgs e) { }
+    protected override void OnPaint(PaintEventArgs e) { }
 
+    // Composite the whole scene into a 32-bpp ARGB bitmap and blit it as a per-pixel-alpha layered
+    // window. Called whenever state changes (instead of Invalidate). Cheap enough: updates are driven
+    // by the scan loop / hotkeys, not a render clock.
+    private void RenderLayered()
+    {
+        if (!IsHandleCreated || IsDisposed || !Visible) return;
+        int w = Bounds.Width, h = Bounds.Height;
+        if (w <= 0 || h <= 0) return;
+
+        using var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit; // grayscale AA carries alpha cleanly
+            PaintScene(g);
+        }
+
+        IntPtr screenDc = GetDC(IntPtr.Zero);
+        IntPtr memDc = CreateCompatibleDC(screenDc);
+        IntPtr hBitmap = bmp.GetHbitmap(Color.FromArgb(0));
+        IntPtr oldBitmap = SelectObject(memDc, hBitmap);
+        try
+        {
+            var size = new SIZE { cx = w, cy = h };
+            var src = new POINT { x = 0, y = 0 };
+            var dst = new POINT { x = Bounds.Left, y = Bounds.Top };
+            var blend = new BLENDFUNCTION
+            {
+                BlendOp = AC_SRC_OVER, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = AC_SRC_ALPHA,
+            };
+            UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, ULW_ALPHA);
+        }
+        finally
+        {
+            SelectObject(memDc, oldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(memDc);
+            ReleaseDC(IntPtr.Zero, screenDc);
+        }
+    }
+
+    private void PaintScene(Graphics g)
+    {
         // Debug-only: outline of the calibrated region (orange=not detected, green=detected).
         if (_debug)
         {
@@ -178,6 +221,7 @@ internal sealed class PriceOverlayForm : Form
         // Easter eggs: a special icon + caption instead of a real price.
         if (row.Meme == MemeKind.Mirror)
         {
+            DrawBackdrop(g, x, screenY, IconSize + 2 + TextWidth(g, "5 Mirrors"));
             DrawIcon(g, _icons.Mirror, "M", x, screenY - IconSize / 2);
             using var memeBrush = new SolidBrush(Color.FromArgb(180, 230, 255)); // mirror-silver
             g.DrawString("5 Mirrors", _priceFont, memeBrush, x + IconSize + 2, screenY - _priceFont.Height / 2);
@@ -187,6 +231,7 @@ internal sealed class PriceOverlayForm : Form
         {
             // Headhunter's belt art is 2:1, so draw it double-wide and push the caption past it.
             const int hhWidth = IconSize * 2;
+            DrawBackdrop(g, x, screenY, hhWidth + 2 + TextWidth(g, "Headhunter!"));
             if (_icons.Headhunter is { } hh && _icons.IsAvailable)
                 g.DrawImage(hh, new Rectangle(x, screenY - IconSize / 2, hhWidth, IconSize));
             using var hhBrush = new SolidBrush(Color.FromArgb(223, 142, 60)); // unique-item gold
@@ -206,18 +251,56 @@ internal sealed class PriceOverlayForm : Form
         // comma-decimal locales (e.g. pt-BR).
         var inv = System.Globalization.CultureInfo.InvariantCulture;
 
-        DrawIcon(g, useDivine ? _icons.Divine : _icons.Exalted, useDivine ? "d" : "ex", x, iconY);
-
         // Multiple items: show total, then per-each price in parentheses.
         string label = mult > 1
             ? $"{total.ToString(fmt, inv)} ({unit.ToString(fmt, inv)} each)"
             : total.ToString(fmt, inv);
+
+        DrawBackdrop(g, x, screenY, IconSize + 2 + TextWidth(g, label));
+        DrawIcon(g, useDivine ? _icons.Divine : _icons.Exalted, useDivine ? "d" : "ex", x, iconY);
+
         // Most valuable row → bright green; otherwise gold (divine) / white (exalted).
         var color = highlightTop ? Color.FromArgb(80, 255, 120) : (useDivine ? Color.Gold : Color.White);
         using var brush = new SolidBrush(color);
         // Vertically center the (now smaller) text against the row, not the icon top.
         int textY = screenY - _priceFont.Height / 2;
         g.DrawString(label, _priceFont, brush, x + IconSize + 2, textY);
+    }
+
+    private int TextWidth(Graphics g, string s) => (int)Math.Ceiling(g.MeasureString(s, _priceFont).Width);
+
+    // A near-black rounded plate behind the icon + price so they read clearly over busy art. The
+    // overlay is color-keyed on pure black (Color.Black = transparent), so the plate uses a non-black
+    // near-black RGB — it renders opaque, which also gives the text a clean edge to anti-alias against.
+    private void DrawBackdrop(Graphics g, int x, int centerY, int contentWidth)
+    {
+        const int padX = 6, padY = 3, radius = 6;
+        int h = Math.Max(IconSize, _priceFont.Height) + padY * 2;
+        var rect = new Rectangle(x - padX, centerY - h / 2, contentWidth + padX * 2, h);
+        var prev = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var path = RoundedRect(rect, radius);
+        // Lighter, semi-transparent slate plate — the game art shows faintly through it. Premultiplied
+        // because the layered window expects premultiplied alpha (see RenderLayered); opaque text/icons
+        // drawn on top are unaffected (premultiplied == straight at full alpha).
+        using var bg = new SolidBrush(Premultiply(Color.FromArgb(150, 55, 55, 64)));
+        g.FillPath(bg, path);
+        g.SmoothingMode = prev;
+    }
+
+    private static Color Premultiply(Color c) =>
+        Color.FromArgb(c.A, c.R * c.A / 255, c.G * c.A / 255, c.B * c.A / 255);
+
+    private static GraphicsPath RoundedRect(Rectangle r, int radius)
+    {
+        int d = radius * 2;
+        var path = new GraphicsPath();
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 
     private void DrawIcon(Graphics g, Bitmap? icon, string fallback, int x, int y)
@@ -231,7 +314,7 @@ internal sealed class PriceOverlayForm : Form
         }
     }
 
-    protected override void OnShown(EventArgs e) { base.OnShown(e); ForceTopmost(); }
+    protected override void OnShown(EventArgs e) { base.OnShown(e); ForceTopmost(); RenderLayered(); }
 
     public void ForceTopmost()
     {
@@ -251,6 +334,28 @@ internal sealed class PriceOverlayForm : Form
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
         int X, int Y, int cx, int cy, uint uFlags);
+
+    // --- Per-pixel-alpha layered window plumbing ---
+    private const int ULW_ALPHA = 0x02;
+    private const byte AC_SRC_OVER = 0x00;
+    private const byte AC_SRC_ALPHA = 0x01;
+
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int x, y; }
+    [StructLayout(LayoutKind.Sequential)] private struct SIZE { public int cx, cy; }
+    [StructLayout(LayoutKind.Sequential)] private struct BLENDFUNCTION
+    {
+        public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat;
+    }
+
+    [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+    [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr hDC);
+    [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr hObject);
+    [DllImport("user32.dll")] private static extern bool UpdateLayeredWindow(
+        IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc,
+        ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
 }
 
 internal static class PriceOverlayManager
