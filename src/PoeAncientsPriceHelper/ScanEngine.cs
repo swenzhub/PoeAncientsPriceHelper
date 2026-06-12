@@ -81,6 +81,12 @@ internal sealed class ScanEngine : IDisposable
         const int TopmostEveryN = 10;
         bool isOpen = false;          // brightness gate: bright enough to attempt OCR
         bool confirmedOpen = false;   // OCR actually found a list — only then show the overlay
+        // After a dismiss (ESC / Ctrl+click) the brightness gate can re-trip on ambient light that
+        // grazes the threshold (the game world after the panel closes reads almost as bright as a real
+        // panel — measured 105 vs a real panel's 101). That re-show is the post-ESC flicker. While this
+        // is set, the brightness-only "reading…" hint is suppressed: nothing shows until OCR actually
+        // confirms a priced row again. Cleared on the next real confirm.
+        bool suppressHintUntilConfirm = false;
         int brightStreak = 0;
         int darkStreak = 0;
         int dismissDark = 0;          // dark frames seen while dismissed — releases the latch when the panel closes
@@ -90,6 +96,13 @@ internal sealed class ScanEngine : IDisposable
         const int OpenCycleMs = 100;                 // tight loop while scanning
         const int ClosedCycleMs = 150;               // polling while watching for the panel — snappy detection
         const int DarkToRelease = 3;                 // dark frames before a dismiss latch releases
+        // Asymmetric brightness hysteresis. A frame counts toward OPENING only above OpenBrightness and
+        // toward CLOSING only below CloseBrightness; readings in the [80,100] dead zone hold the current
+        // state so brightness hovering at the boundary can't flicker the overlay. OpenBrightness stays
+        // at the detector's old threshold (100) on purpose — real panels read as low as 101, so raising
+        // it would miss dim ones; the confirm-gate (above) is what rejects bright-but-fake frames.
+        const int OpenBrightness = 100;
+        const int CloseBrightness = 80;
 
         PriceOverlayManager.EnsureVisible(_config.RegionRect, _config.OverlayXOffset, _icons);
         Log("overlay ready");
@@ -101,16 +114,25 @@ internal sealed class ScanEngine : IDisposable
             try
             {
                 using var bmp = ScreenCapture.CaptureRegion(_config.RegionRect);
-                bool rawBright = detector.IsOpen(bmp, out var sampledPixel);
+                detector.IsOpen(bmp, out var sampledPixel);   // bool unused — we apply our own hysteresis
+                int brightness = (sampledPixel.R + sampledPixel.G + sampledPixel.B) / 3;
+                bool brightFrame = brightness > OpenBrightness;   // strong enough to count toward opening
+                bool darkFrame = brightness < CloseBrightness;    // dim enough to count toward closing
 
                 // Dismissed (ESC / Left-Ctrl+click): stay hidden and don't scan until the panel
-                // actually closes (a few dark frames). ESC closes the panel so this clears quickly;
-                // Ctrl+click keeps it open, so the overlay stays dismissed (no flicker) until the
-                // user closes the panel — then a fresh open shows prices again.
+                // actually closes (a few genuinely dark frames). ESC closes the panel so this clears
+                // quickly; Ctrl+click keeps it open, so the overlay stays dismissed (no flicker) until
+                // the user closes the panel. On release, arm hint-suppression so the next brightness
+                // blip can't re-show the overlay before OCR re-confirms a real panel.
                 if (_dismissed)
                 {
-                    if (rawBright) dismissDark = 0; else dismissDark++;
-                    if (dismissDark >= DarkToRelease) { _dismissed = false; Log("dismiss released (panel closed)"); }
+                    if (darkFrame) dismissDark++; else dismissDark = 0;
+                    if (dismissDark >= DarkToRelease)
+                    {
+                        _dismissed = false;
+                        suppressHintUntilConfirm = true;
+                        Log("dismiss released (panel closed)");
+                    }
                     isOpen = false; confirmedOpen = false; brightStreak = 0; darkStreak = 0;
                     slots.Clear(); lastRows = [];
                     _showing = false;
@@ -120,9 +142,11 @@ internal sealed class ScanEngine : IDisposable
                 {
                     dismissDark = 0;
 
-                    // Hysteresis: 2 consecutive bright frames to open, 3 dark frames to close.
-                    if (rawBright) { brightStreak++; darkStreak = 0; }
-                    else { darkStreak++; brightStreak = 0; }
+                    // Hysteresis: 2 consecutive bright frames to open, 3 dark frames to close; readings
+                    // in the [CloseBrightness, OpenBrightness] dead zone hold the current state.
+                    if (brightFrame) { brightStreak++; darkStreak = 0; }
+                    else if (darkFrame) { darkStreak++; brightStreak = 0; }
+                    else { brightStreak = 0; darkStreak = 0; }
                     bool prevIsOpen = isOpen;
                     if (!isOpen && brightStreak >= 2) isOpen = true;
                     else if (isOpen && darkStreak >= 3) isOpen = false;
@@ -130,20 +154,20 @@ internal sealed class ScanEngine : IDisposable
                     // Heartbeat every ~5s so we know the loop is alive
                     if (cycleCount % 12 == 0)
                     {
-                        int brightness = (sampledPixel.R + sampledPixel.G + sampledPixel.B) / 3;
                         Log($"heartbeat cycle={cycleCount} panelOpen={isOpen} confirmed={confirmedOpen} region={_config.RegionRect} rows={lastRows.Count} " +
                             $"avgPixel=#{sampledPixel.R:X2}{sampledPixel.G:X2}{sampledPixel.B:X2} brightness={brightness}");
                     }
 
                     if (isOpen != prevIsOpen)
                     {
-                        int b = (sampledPixel.R + sampledPixel.G + sampledPixel.B) / 3;
-                        Log($"panel {(isOpen ? "OPEN" : "CLOSED")} brightness={b} " +
+                        Log($"panel {(isOpen ? "OPEN" : "CLOSED")} brightness={brightness} " +
                             $"avgPixel=#{sampledPixel.R:X2}{sampledPixel.G:X2}{sampledPixel.B:X2}");
 
-                        // Panel just detected — show the "reading…" hint right away, before the
-                        // first (200–400ms) OCR runs, so the wait isn't a blank screen.
-                        if (isOpen)
+                        // Panel just detected — show the "reading…" hint right away, before the first
+                        // (200–400ms) OCR runs, so the wait isn't a blank screen. But right after a
+                        // dismiss, suppress it: a brightness blip that isn't a real panel never
+                        // confirms, so showing the hint here is exactly the post-ESC flicker.
+                        if (isOpen && !suppressHintUntilConfirm)
                         {
                             _showing = false;
                             PriceOverlayManager.UpdateState([], false, true);
@@ -175,6 +199,7 @@ internal sealed class ScanEngine : IDisposable
                                 if (!confirmedOpen && reads.Any(r => r.HasPrice))
                                 {
                                     confirmedOpen = true;
+                                    suppressHintUntilConfirm = false;   // a real panel is back — re-enable the hint
                                     Log("panel CONFIRMED (priced row found)");
                                 }
 
@@ -192,7 +217,8 @@ internal sealed class ScanEngine : IDisposable
                     }
 
                     // "reading" = brightness says a panel is up but OCR hasn't confirmed prices yet.
-                    bool reading = isOpen && !confirmedOpen;
+                    // Suppressed straight after a dismiss until a real confirm (anti-flicker, see above).
+                    bool reading = isOpen && !confirmedOpen && !suppressHintUntilConfirm;
 
                     // Show prices only once OCR has confirmed a real list, not on brightness alone.
                     _showing = confirmedOpen;

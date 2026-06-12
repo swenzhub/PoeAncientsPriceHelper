@@ -43,13 +43,15 @@ public class HotkeyBindingTests
     }
 
     [Theory]
-    [InlineData(KeyCode.VcF3, true)]
-    [InlineData(KeyCode.VcF4, true)]
     [InlineData(KeyCode.VcEscape, true)]
     [InlineData(KeyCode.VcLeftControl, true)]
+    [InlineData(KeyCode.VcRightControl, true)]
+    // F3/F4 are now ordinary rebindable defaults, not reserved gestures.
+    [InlineData(KeyCode.VcF3, false)]
+    [InlineData(KeyCode.VcF4, false)]
     [InlineData(KeyCode.VcF5, false)]
     [InlineData(KeyCode.VcP, false)]
-    public void IsReserved_FlagsAppsOwnKeys(KeyCode key, bool reserved)
+    public void IsReserved_FlagsOnlyFixedGestures(KeyCode key, bool reserved)
     {
         Assert.Equal(reserved, HotkeyBinding.IsReserved(key));
     }

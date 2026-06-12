@@ -18,7 +18,6 @@ internal sealed class CalibrationOverlay : Form
     public CalibrationOverlay()
     {
         FormBorderStyle = FormBorderStyle.None;
-        WindowState = FormWindowState.Maximized;
         TopMost = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -29,7 +28,12 @@ internal sealed class CalibrationOverlay : Form
         Cursor = Cursors.Cross;
         Text = "PoeAncientsPriceHelper - Calibration";
 
-        var bounds = Screen.PrimaryScreen!.Bounds;
+        // Span the whole virtual desktop (all monitors) so the region can be drawn on any of them, not
+        // just the primary (#3). On multi-monitor setups VirtualScreen.Location can be negative (a
+        // monitor left/above the primary); mouse points are form-client coords, so the selected rect is
+        // offset by Bounds.Location back into absolute screen coords in OnMouseUp. WindowState.Maximized
+        // would only fill one monitor, so it's gone — Bounds drives the size instead.
+        var bounds = SystemInformation.VirtualScreen;
         Bounds = bounds;
 
         _screenSnapshot = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb);
@@ -74,7 +78,9 @@ internal sealed class CalibrationOverlay : Form
         if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); return; }
         if ((e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) && _confirmedRect.Width > 0)
         {
-            RegionRectResult = _confirmedRect;
+            // _confirmedRect is form-client coords; shift by the form origin (= virtual-screen origin)
+            // to get absolute screen coords, which is what ScreenCapture/overlay positioning expect.
+            RegionRectResult = _confirmedRect with { X = _confirmedRect.X + Bounds.X, Y = _confirmedRect.Y + Bounds.Y };
             DialogResult = DialogResult.OK;
             Close();
         }

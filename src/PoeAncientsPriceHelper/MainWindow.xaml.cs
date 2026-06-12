@@ -1,7 +1,5 @@
 using System.Net.Http;
-using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Interop;
 using MahApps.Metro.Controls;
 using SharpHook.Data;
 
@@ -16,14 +14,13 @@ public partial class MainWindow : MetroWindow
     private readonly HttpClient _http = new();
     private bool _loading;
 
-    // F4 (calibrate) stays a Win32 hotkey — it's a rare, full-screen action that benefits from being
-    // suppressed from the game. Start/Stop moved to the App-level SharpHook hook (configurable key).
-    private const int HotkeyId = 1;
-    private const int VK_F4 = 0x73;
-    private IntPtr _hwnd;
+    // Minimize-to-tray (#2). The window hides to a tray icon on minimize and restores from it; the X
+    // button still fully exits. Scanning is independent of this window, so it keeps running in the tray.
+    private System.Windows.Forms.NotifyIcon? _trayIcon;
+    private bool _trayBalloonShown;
 
-    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
-    [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    // All three hotkeys (Start/Stop, Debug, Calibrate) now live on the App-level SharpHook hook and are
+    // user-configurable — no Win32 RegisterHotKey here anymore.
 
     public MainWindow()
     {
@@ -31,25 +28,7 @@ public partial class MainWindow : MetroWindow
         var v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
         if (v is not null) VersionLabel.Text = $"v{v.Major}.{v.Minor}.{v.Build}";
         Loaded += OnLoaded;
-        SourceInitialized += (_, _) =>
-        {
-            _hwnd = new WindowInteropHelper(this).Handle;
-            // RegisterHotKey is system-wide and fails (returns false) if another window already owns
-            // the key. Surface a failed F4 in the title rather than letting it fail silently.
-            if (!RegisterHotKey(_hwnd, HotkeyId, 0, VK_F4))
-            {
-                Console.Error.WriteLine("[Hotkey] RegisterHotKey failed for F4 (already held by another app/instance)");
-                Title += "  ⚠ F4 hotkey unavailable";
-            }
-            HwndSource.FromHwnd(_hwnd)!.AddHook(WndProc);
-        };
-    }
-
-    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
-    {
-        const int WM_HOTKEY = 0x0312;
-        if (msg == WM_HOTKEY && wParam.ToInt32() == HotkeyId) { RunCalibration(); handled = true; }
-        return IntPtr.Zero;
+        StateChanged += OnStateChanged;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -66,9 +45,16 @@ public partial class MainWindow : MetroWindow
         LeagueBox.SelectedItem = _config.AvailableLeagues.Contains(_config.LeagueName)
             ? _config.LeagueName
             : _config.AvailableLeagues.FirstOrDefault();
-        var key = HotkeyBinding.Parse(_config.StartStopHotkey);
-        HotkeyLabel.Text = HotkeyBinding.Display(key);
-        App.SetStartStopKey(key);   // arm the global hook with the persisted binding
+        // Arm the global hook with all three persisted bindings and mirror them into the labels.
+        var startStop = HotkeyBinding.Parse(_config.StartStopHotkey);
+        var debug = HotkeyBinding.Parse(_config.DebugHotkey);
+        var calibrate = HotkeyBinding.Parse(_config.CalibrateHotkey);
+        HotkeyLabel.Text = HotkeyBinding.Display(startStop);
+        DebugHotkeyLabel.Text = HotkeyBinding.Display(debug);
+        CalibrateHotkeyLabel.Text = HotkeyBinding.Display(calibrate);
+        App.SetStartStopKey(startStop);
+        App.SetDebugKey(debug);
+        App.SetCalibrateKey(calibrate);
         UpdateRegionLabel();
         _loading = false;
     }
@@ -127,7 +113,8 @@ public partial class MainWindow : MetroWindow
         }
     }
 
-    private void RunCalibration()
+    // internal so the App-level hook (configurable Calibrate key) can trigger it too.
+    internal void RunCalibration()
     {
         var rect = CalibrationOverlay.RunOnStaThread();
         if (rect is null) return;
@@ -167,9 +154,60 @@ public partial class MainWindow : MetroWindow
         }
     }
 
+    // Minimize → hide the window and drop to the tray (scanning keeps running). Restore/Exit live on
+    // the tray icon. The X button is unaffected and still quits via Window_Closing.
+    private void OnStateChanged(object? sender, EventArgs e)
+    {
+        if (WindowState != WindowState.Minimized) return;
+        EnsureTrayIcon();
+        _trayIcon!.Visible = true;
+        Hide();   // remove the taskbar button; the tray icon is now the way back
+        if (!_trayBalloonShown)
+        {
+            _trayIcon.ShowBalloonTip(3000, "Poe Ancients Price Helper",
+                "Still running — double-click the tray icon to restore.",
+                System.Windows.Forms.ToolTipIcon.Info);
+            _trayBalloonShown = true;
+        }
+    }
+
+    private void EnsureTrayIcon()
+    {
+        if (_trayIcon is not null) return;
+        var exe = Environment.ProcessPath;
+        var icon = exe is not null
+            ? System.Drawing.Icon.ExtractAssociatedIcon(exe)
+            : System.Drawing.SystemIcons.Application;
+        _trayIcon = new System.Windows.Forms.NotifyIcon
+        {
+            Icon = icon,
+            Text = "Poe Ancients Price Helper",
+            Visible = false,
+        };
+        _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+        var menu = new System.Windows.Forms.ContextMenuStrip();
+        menu.Items.Add("Show", null, (_, _) => RestoreFromTray());
+        menu.Items.Add("Exit", null, (_, _) => ExitFromTray());
+        _trayIcon.ContextMenuStrip = menu;
+    }
+
+    private void RestoreFromTray()
+    {
+        Show();
+        WindowState = WindowState.Normal;
+        Activate();
+        if (_trayIcon is not null) _trayIcon.Visible = false;
+    }
+
+    private void ExitFromTray()
+    {
+        if (_trayIcon is not null) _trayIcon.Visible = false;
+        Close();   // routes through Window_Closing for the normal shutdown/cleanup
+    }
+
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
-        UnregisterHotKey(_hwnd, HotkeyId);
+        _trayIcon?.Dispose();
         _engine?.StopAndWait(TimeSpan.FromSeconds(2));
         _engine?.Dispose();
         _repo?.Dispose();
@@ -186,11 +224,30 @@ public partial class MainWindow : MetroWindow
         await StartupAsync();   // re-fetch prices for the newly selected league
     }
 
-    private void RebindButton_Click(object sender, RoutedEventArgs e)
+    // The rebind in progress: which action, and the button/label to update. Only one runs at a time.
+    private HotkeyBinding.Action _rebindAction;
+    private System.Windows.Controls.Button? _rebindButton;
+    private System.Windows.Controls.TextBlock? _rebindLabel;
+
+    private void RebindButton_Click(object sender, RoutedEventArgs e) =>
+        BeginRebind(HotkeyBinding.Action.StartStop, RebindButton, HotkeyLabel);
+
+    private void RebindDebugButton_Click(object sender, RoutedEventArgs e) =>
+        BeginRebind(HotkeyBinding.Action.Debug, RebindDebugButton, DebugHotkeyLabel);
+
+    private void RebindCalibrateButton_Click(object sender, RoutedEventArgs e) =>
+        BeginRebind(HotkeyBinding.Action.Calibrate, RebindCalibrateButton, CalibrateHotkeyLabel);
+
+    private void BeginRebind(HotkeyBinding.Action action, System.Windows.Controls.Button button,
+                             System.Windows.Controls.TextBlock label)
     {
-        RebindButton.IsEnabled = false;
-        RebindButton.Content = "Press a key… (Esc to cancel)";
-        App.BeginHotkeyCapture(OnHotkeyCaptured);   // outcome arrives on the UI thread
+        _rebindAction = action;
+        _rebindButton = button;
+        _rebindLabel = label;
+        // Disable all three rebind buttons so a second capture can't start mid-rebind.
+        SetRebindButtonsEnabled(false);
+        button.Content = "Press a key… (Esc to cancel)";
+        App.BeginHotkeyCapture(action, OnHotkeyCaptured);   // outcome arrives on the UI thread
     }
 
     // Invoked (marshalled to the UI thread) when the global hook resolves a rebind capture.
@@ -199,15 +256,29 @@ public partial class MainWindow : MetroWindow
         switch (outcome)
         {
             case App.CaptureOutcome.Captured:
-                _config.StartStopHotkey = HotkeyBinding.ToStorage(code);
+                switch (_rebindAction)
+                {
+                    case HotkeyBinding.Action.StartStop:
+                        _config.StartStopHotkey = HotkeyBinding.ToStorage(code);
+                        App.SetStartStopKey(code);
+                        break;
+                    case HotkeyBinding.Action.Debug:
+                        _config.DebugHotkey = HotkeyBinding.ToStorage(code);
+                        App.SetDebugKey(code);
+                        break;
+                    case HotkeyBinding.Action.Calibrate:
+                        _config.CalibrateHotkey = HotkeyBinding.ToStorage(code);
+                        App.SetCalibrateKey(code);
+                        break;
+                }
                 ConfigStore.Save(_config);
-                App.SetStartStopKey(code);
-                HotkeyLabel.Text = HotkeyBinding.Display(code);
+                if (_rebindLabel is not null) _rebindLabel.Text = HotkeyBinding.Display(code);
                 EndRebind();
                 break;
             case App.CaptureOutcome.Reserved:
                 // Still listening — tell the user why that key won't take, keep the prompt up.
-                RebindButton.Content = $"{HotkeyBinding.Display(code)} is in use — try another";
+                if (_rebindButton is not null)
+                    _rebindButton.Content = $"{HotkeyBinding.Display(code)} is in use — try another";
                 break;
             case App.CaptureOutcome.Cancelled:
                 EndRebind();
@@ -217,7 +288,16 @@ public partial class MainWindow : MetroWindow
 
     private void EndRebind()
     {
-        RebindButton.Content = "Rebind";
-        RebindButton.IsEnabled = true;
+        if (_rebindButton is not null) _rebindButton.Content = "Rebind";
+        _rebindButton = null;
+        _rebindLabel = null;
+        SetRebindButtonsEnabled(true);
+    }
+
+    private void SetRebindButtonsEnabled(bool enabled)
+    {
+        RebindButton.IsEnabled = enabled;
+        RebindDebugButton.IsEnabled = enabled;
+        RebindCalibrateButton.IsEnabled = enabled;
     }
 }

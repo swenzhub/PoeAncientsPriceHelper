@@ -13,20 +13,28 @@ public partial class App : System.Windows.Application
     private TaskPoolGlobalHook? _hook;
     private bool _leftCtrlDown;
 
-    // The currently-bound Start/Stop key, matched on every key event. MainWindow pushes the persisted
-    // value once config is loaded and again on each rebind; until then F5 keeps working as before.
-    private static volatile KeyCode _startStopKey = HotkeyBinding.Default;
+    // The currently-bound hotkeys, matched on every key event. MainWindow pushes the persisted values
+    // once config is loaded and again on each rebind; until then the historical defaults keep working.
+    private static volatile KeyCode _startStopKey = HotkeyBinding.DefaultStartStop;
+    private static volatile KeyCode _debugKey = HotkeyBinding.DefaultDebug;
+    private static volatile KeyCode _calibrateKey = HotkeyBinding.DefaultCalibrate;
     internal static void SetStartStopKey(KeyCode key) => _startStopKey = key;
+    internal static void SetDebugKey(KeyCode key) => _debugKey = key;
+    internal static void SetCalibrateKey(KeyCode key) => _calibrateKey = key;
 
     // One-shot rebind capture. While active, the hook swallows keys from their normal actions and the
-    // next non-reserved key becomes the binding. Outcomes are reported via the callback, marshalled to
-    // the UI thread. Reserved keys report back but keep listening; Esc cancels.
+    // next available key becomes the binding. Outcomes are reported via the callback, marshalled to the
+    // UI thread. Reserved keys (or a key already bound to another action) report back but keep
+    // listening; Esc cancels. _captureAction is the binding being replaced, so its own current key
+    // doesn't count as a collision.
     internal enum CaptureOutcome { Captured, Cancelled, Reserved }
     private static volatile bool _capturing;
+    private static volatile HotkeyBinding.Action _captureAction;
     private static Action<CaptureOutcome, KeyCode>? _captureCallback;
 
-    internal static void BeginHotkeyCapture(Action<CaptureOutcome, KeyCode> onEvent)
+    internal static void BeginHotkeyCapture(HotkeyBinding.Action action, Action<CaptureOutcome, KeyCode> onEvent)
     {
+        _captureAction = action;
         _captureCallback = onEvent;
         _capturing = true;
     }
@@ -95,8 +103,9 @@ public partial class App : System.Windows.Application
         {
             var code = ev.Data.KeyCode;
             if (_capturing) { HandleCapture(code); return; }   // swallow + consume for rebind
-            // Toggle on release (not press) so holding the key can't auto-repeat-fire many toggles.
-            if (code == KeyCode.VcF3) PriceOverlayManager.ToggleDebug();
+            // Act on release (not press) so holding a key can't auto-repeat-fire many times.
+            if (code == _debugKey) PriceOverlayManager.ToggleDebug();
+            else if (code == _calibrateKey) InvokeCalibrate();
             else if (code == _startStopKey) InvokeStartStopToggle();
             else if (code is KeyCode.VcLeftControl) _leftCtrlDown = false;
         };
@@ -109,13 +118,29 @@ public partial class App : System.Windows.Application
         _ = _hook.RunAsync();
     }
 
-    // Runs on a hook thread-pool thread. Esc cancels; a reserved key reports back but keeps listening;
-    // anything else is the new binding. The callback is marshalled to the UI thread.
+    // Runs on a hook thread-pool thread. Esc cancels; a reserved key or one already bound to another
+    // action reports back but keeps listening; anything else is the new binding. The callback is
+    // marshalled to the UI thread.
     private static void HandleCapture(KeyCode code)
     {
         if (code == KeyCode.VcEscape) { FinishCapture(CaptureOutcome.Cancelled, code); return; }
-        if (HotkeyBinding.IsReserved(code)) { ReportCapture(CaptureOutcome.Reserved, code); return; }
+        if (HotkeyBinding.IsReserved(code) || CollidesWithOtherAction(code, _captureAction))
+        {
+            ReportCapture(CaptureOutcome.Reserved, code);
+            return;
+        }
         FinishCapture(CaptureOutcome.Captured, code);
+    }
+
+    // True if the key is already bound to one of the two actions that isn't the one being rebound —
+    // binding it would make a single press fire two actions. The action being rebound is skipped so
+    // re-confirming its own current key is allowed.
+    private static bool CollidesWithOtherAction(KeyCode code, HotkeyBinding.Action target)
+    {
+        if (target != HotkeyBinding.Action.StartStop && code == _startStopKey) return true;
+        if (target != HotkeyBinding.Action.Debug && code == _debugKey) return true;
+        if (target != HotkeyBinding.Action.Calibrate && code == _calibrateKey) return true;
+        return false;
     }
 
     private static void FinishCapture(CaptureOutcome outcome, KeyCode code)
@@ -137,6 +162,9 @@ public partial class App : System.Windows.Application
 
     private static void InvokeStartStopToggle() =>
         Current?.Dispatcher.BeginInvoke(() => (Current.MainWindow as MainWindow)?.ToggleStartStop());
+
+    private static void InvokeCalibrate() =>
+        Current?.Dispatcher.BeginInvoke(() => (Current.MainWindow as MainWindow)?.RunCalibration());
 
     protected override void OnExit(ExitEventArgs e)
     {

@@ -86,7 +86,9 @@ internal sealed class PriceOverlayForm : Form
         // Visible when prices are ready, while reading (to show the hint), or in debug mode.
         bool shouldShow = _panelOpen || _reading || _debug;
         if (shouldShow && !Visible) { Show(); ForceTopmost(); }
-        else if (!shouldShow && Visible) Hide();
+        // Clear the rows as we hide so a later re-show can't briefly repaint the previous encounter's
+        // prices before the scan loop pushes fresh state (#5).
+        else if (!shouldShow && Visible) { _rows = []; Hide(); }
     }
 
     // Hide the window right now, off the hotkey thread — instant ESC/close response without
@@ -97,6 +99,7 @@ internal sealed class PriceOverlayForm : Form
         if (InvokeRequired) { BeginInvoke(HideNow); return; }
         _panelOpen = false;
         _reading = false;
+        _rows = [];   // drop stale prices immediately so debug-mode (still visible) can't repaint them
         ApplyVisibility();
         if (Visible) RenderLayered();
     }
@@ -149,6 +152,12 @@ internal sealed class PriceOverlayForm : Form
 
     private void PaintScene(Graphics g)
     {
+        // All geometry below is in absolute screen coords (region/price positions). The layered bitmap
+        // is form-local, and the form may sit on a non-primary monitor (origin != 0,0), so shift the
+        // whole scene by the form origin to map absolute coords into the bitmap (#3). On the primary
+        // monitor at (0,0) this is a no-op.
+        g.TranslateTransform(-Bounds.Left, -Bounds.Top);
+
         // Debug-only: outline of the calibrated region (orange=not detected, green=detected).
         if (_debug)
         {
@@ -373,7 +382,10 @@ internal static class PriceOverlayManager
                 return;
             }
 
-            var screen = Screen.PrimaryScreen!.Bounds;
+            // Host the overlay on the monitor that contains the calibrated region (#3), not always the
+            // primary. Sized to just that monitor, so the per-frame layered bitmap stays one-monitor
+            // small (no perf regression) while prices land on the monitor PoE runs on.
+            var screen = Screen.FromRectangle(regionRect).Bounds;
             using var ready = new ManualResetEventSlim(false);
             _thread = new Thread(() =>
             {
