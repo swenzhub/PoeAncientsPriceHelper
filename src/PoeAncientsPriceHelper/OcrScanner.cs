@@ -13,6 +13,7 @@ internal sealed class OcrScanner : IDisposable
     private readonly TesseractEngine _engineCol;
     private readonly TesseractEngine _engineSparse;
     private readonly Action<string>? _log;
+    private readonly bool _debug;
     private readonly object _logLock = new();
     private const float MinConfidence = 10f;
     private const int UpscaleFactor = 2;
@@ -21,11 +22,14 @@ internal sealed class OcrScanner : IDisposable
     // like "Void Flux" survive; OCR fragments are still mostly 1–3 char tokens.
     private const int MinWordLength = 4;
 
-    public OcrScanner(string tessdataDir, Action<string>? log = null)
+    // debug gates the diagnostic debug_ocr.png dump (see Scan). The flag is injected rather than
+    // read from App.DebugMode so this engine-level type stays free of UI/app statics.
+    public OcrScanner(string tessdataDir, Action<string>? log = null, bool debug = false)
     {
         _engineCol = new TesseractEngine(tessdataDir, "eng", EngineMode.Default);
         _engineSparse = new TesseractEngine(tessdataDir, "eng", EngineMode.Default);
         _log = log;
+        _debug = debug;
     }
 
     // Each row starts with ~3 cost-rune glyphs on the left, then "Nx ItemName". Cropping the
@@ -56,8 +60,9 @@ internal sealed class OcrScanner : IDisposable
         Task.WaitAll(tCol, tSparse);
         var rows = MergeByPosition(tCol.Result, tSparse.Result);
 
-        // When OCR catches few rows, dump the exact image fed to Tesseract for inspection.
-        if (rows.Count <= 2)
+        // When OCR catches few rows, dump the exact image fed to Tesseract for inspection. Debug-only:
+        // for end users this would be needless disk churn (~every 100ms while a panel mis-detects).
+        if (_debug && rows.Count <= 2)
         {
             try { upscaled.Save(Path.Combine(AppContext.BaseDirectory, "debug_ocr.png"), System.Drawing.Imaging.ImageFormat.Png); }
             catch { /* best-effort diagnostic */ }

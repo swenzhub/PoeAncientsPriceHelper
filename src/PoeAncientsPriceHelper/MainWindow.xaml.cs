@@ -11,7 +11,9 @@ public partial class MainWindow : MetroWindow
     private PriceRepository? _repo;
     private IconCache? _icons;
     private ScanEngine? _engine;
-    private readonly HttpClient _http = new();
+    // 15s cap so a stalled poe.ninja/poecdn connection can't hang a whole fetch cycle for the
+    // default 100s. Per-fetch cancellation (shutdown) is handled inside PriceRepository.
+    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private bool _loading;
 
     // Minimize-to-tray (#2). The window hides to a tray icon on minimize and restores from it; the X

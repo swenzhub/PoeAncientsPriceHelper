@@ -72,7 +72,7 @@ internal sealed class ScanEngine : IDisposable
 
         Log($"START prices={_prices.ItemCount} icons={_icons.IsAvailable} region={_config.RegionRect}");
 
-        using var scanner = new OcrScanner(tessdataDir, Log);
+        using var scanner = new OcrScanner(tessdataDir, Log, App.DebugMode);
         var detector = new ListDetector();
         var sw = Stopwatch.StartNew();
         var slots = new List<RowSlot>();             // per-row accumulator: priced rows lock, misses keep retrying

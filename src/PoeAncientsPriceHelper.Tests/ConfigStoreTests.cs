@@ -1,7 +1,6 @@
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using Newtonsoft.Json;
 using PoeAncientsPriceHelper;
 
 namespace PoeAncientsPriceHelper.Tests;
@@ -70,21 +69,21 @@ public class ConfigStoreTests
         Assert.Equal("Runes of Aldur", cfg.LeagueName);
     }
 
-    // Helpers that redirect ConfigStore's path via a temp directory.
-    // ConfigStore uses AppContext.BaseDirectory which we can't easily swap,
-    // so we exercise the logic directly via JSON round-trip here.
-    private static AppConfig LoadFrom(string dir)
+    [Fact]
+    public void Save_OverwritesExisting_AndLeavesNoTempFile()
     {
-        var path = Path.Combine(dir, "config.json");
-        if (!File.Exists(path)) return new AppConfig();
-        try { return JsonConvert.DeserializeObject<AppConfig>(File.ReadAllText(path)) ?? new AppConfig(); }
-        catch { return new AppConfig(); }
+        using var dir = new TempDir();
+        SaveTo(dir.Path, new AppConfig { LeagueName = "First" });
+        SaveTo(dir.Path, new AppConfig { LeagueName = "Second" }); // exercises the File.Replace path
+        Assert.Equal("Second", LoadFrom(dir.Path).LeagueName);
+        // The atomic-swap temp file must not linger next to the real config.
+        Assert.False(File.Exists(Path.Combine(dir.Path, "config.json.tmp")));
     }
 
-    private static void SaveTo(string dir, AppConfig cfg)
-    {
-        File.WriteAllText(Path.Combine(dir, "config.json"),
-            JsonConvert.SerializeObject(cfg, Formatting.Indented));
-    }
+    // Exercise the real ConfigStore (its path is injectable for exactly this reason) rather than
+    // reimplementing the round-trip, so these tests cover the production load/save code.
+    private static AppConfig LoadFrom(string dir) => ConfigStore.Load(dir);
+
+    private static void SaveTo(string dir, AppConfig cfg) => ConfigStore.Save(cfg, dir);
 }
 
