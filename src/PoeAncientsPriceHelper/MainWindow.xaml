@@ -89,6 +89,13 @@
                    HorizontalAlignment="Left" VerticalAlignment="Bottom"
                    Foreground="#666" FontSize="11"/>
 
+        <TextBlock Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2"
+                   x:Name="UpdateLink"
+                   HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                   Foreground="#FF5555" FontSize="11" FontWeight="SemiBold"
+                   Cursor="Hand" Visibility="Collapsed" TextDecorations="Underline"
+                   MouseLeftButtonUp="UpdateLink_Click"/>
+
         <Button Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2"
                 x:Name="DonateButton"
                 Content="☕ Buy me a coffee"

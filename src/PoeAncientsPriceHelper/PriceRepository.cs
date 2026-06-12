@@ -25,7 +25,12 @@ internal sealed class PriceRepository : IDisposable
     // thread-pool thread; subscribers must marshal to the UI thread.
     public event Action? PricesUpdated;
 
-    private static readonly string[] ExchangeTypes = ["Verisium", "Runes", "Expedition", "Currency"];
+    // UncutGems shares the exact same response shape as the others: a root items[] maps each
+    // line id (e.g. "uncut-spirit-gem-19") to a display name that already carries the level
+    // ("Uncut Spirit Gem (Level 19)"), which NormalizeName reduces to "uncut spirit gem level 19" —
+    // the same string the OCR produces. So no special parsing is needed; matching safety (pinning
+    // the gem type + level) lives in ScanEngine.BuildPriceRows.
+    private static readonly string[] ExchangeTypes = ["Verisium", "Runes", "Expedition", "Currency", "UncutGems"];
 
     public PriceRepository(HttpClient http) => _http = http;
 

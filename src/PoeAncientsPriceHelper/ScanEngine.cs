@@ -268,6 +268,24 @@ internal sealed class ScanEngine : IDisposable
                 stableY = prevY;
             newPositions[row.NormalizedName] = stableY;
 
+            // Uncut gems (skill / spirit / support) are priced PER LEVEL, and adjacent levels differ
+            // several-fold (e.g. spirit gem L18 ≈ 0.027 div vs L19 ≈ 0.143 div). The only things that
+            // distinguish one gem line from another are the TYPE word and the LEVEL number, so we pin
+            // both EXACTLY and deliberately skip the prefix/fuzzy fallbacks here: a single-character OCR
+            // slip on the digit (or skill↔spirit) would otherwise lock a confidently-wrong, multiples-off
+            // price. If the type or level can't be read cleanly, the row shows '?' until a clean read
+            // arrives — better than guessing a neighbouring level.
+            if (TryResolveGemKey(row.NormalizedName, out var gemKey))
+            {
+                if (gemKey is not null && snapshot.TryGetValue(gemKey, out var gemEntry))
+                    rows.Add(new PriceRow(stableY, row.RawText, gemEntry.DivineValue, gemEntry.ExaltedValue,
+                        true, row.Multiplier, gemKey, true));
+                else
+                    // Recognised as an uncut gem but type+level didn't pin to a known price → '?', never fuzzy.
+                    rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, false, row.Multiplier, row.NormalizedName));
+                continue;
+            }
+
             // Easter eggs: certain OCR'd names render as a gag icon + caption instead of a price.
             // ExactMatch=true so they lock on the first read like a real priced row.
             //   "5x random currency" (the "5x" is stripped into the multiplier, leaving "random
@@ -337,6 +355,23 @@ internal sealed class ScanEngine : IDisposable
             if (score > bestScore) { bestScore = score; best = key; }
         }
         return best;
+    }
+
+    // Detect an uncut gem and pin its identity. Returns true when the name is an uncut gem (a type
+    // word skill/spirit/support together with "gem"); the discriminating type word and "gem" are what
+    // mark it, so a slip in the boilerplate words ("uncot", "levei") doesn't hide a gem. When a level
+    // number is also present, `key` is the canonical price key with the type and level pinned exactly
+    // (no fuzzy) — caller looks it up as-is. When the level can't be read, `key` is null so the caller
+    // shows '?' rather than guessing an adjacent level (which can be several-fold off).
+    internal static bool TryResolveGemKey(string normalizedName, out string? key)
+    {
+        key = null;
+        if (!normalizedName.Contains("gem")) return false;
+        var type = Regex.Match(normalizedName, @"\b(skill|spirit|support)\b");
+        if (!type.Success) return false;
+        var lvl = Regex.Match(normalizedName, @"\blevel\s+(\d+)\b");
+        if (lvl.Success) key = $"uncut {type.Groups[1].Value} gem level {lvl.Groups[1].Value}";
+        return true;
     }
 
     internal static int Levenshtein(string a, string b)

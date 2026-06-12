@@ -9,6 +9,11 @@ stack is worth.
 
 - **Live prices** next to each list row, sourced from poe.ninja (auto-refreshed every 30 minutes).
 - **Stack-aware** — shows the total and the per-item price, e.g. `2 (0.5 each)`.
+- **Uncut gems** (skill / spirit / support) priced by exact type **and level** — a row shows `?`
+  rather than a guessed price if the gem type or level can't be read cleanly (neighbouring levels
+  can differ several-fold, so a wrong-level price would be misleading).
+- **Update notifications** — checks GitHub on startup and shows a link in the app when a newer
+  release is available.
 - **Click-through overlay** that never gets in the way of the game.
 - **One-time calibration** — just drag a box around the in-game list panel.
 - **Hotkeys:** `F4` recalibrate · `F3` debug boxes · `Esc` / `Ctrl+Click` hide.

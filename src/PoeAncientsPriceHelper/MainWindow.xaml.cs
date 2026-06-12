@@ -36,6 +36,62 @@ public partial class MainWindow : MetroWindow
         _config = ConfigStore.Load();
         PopulateFields();
         await StartupAsync();
+        // Fire-and-forget, once per launch (not inside StartupAsync, which re-runs on league change).
+        // A slow/hung GitHub response must never delay the price fetch or the Start button.
+        _ = CheckForUpdatesAsync();
+    }
+
+    // Quietly check GitHub for a newer release on startup. On success with a higher version, show a
+    // red "update available" link; on any failure (offline, rate-limited, API shape change) do nothing.
+    private string? _updateUrl;
+
+    private async Task CheckForUpdatesAsync()
+    {
+        try
+        {
+            var current = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+            if (current is null) return;
+
+            var req = new HttpRequestMessage(HttpMethod.Get,
+                "https://api.github.com/repos/pedro-quiterio/PoeAncientsPriceHelper/releases/latest");
+            req.Headers.TryAddWithoutValidation("User-Agent", "PoeAncientsPriceHelper");  // GitHub 403s without one
+            req.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+
+            var resp = await _http.SendAsync(req);
+            if (!resp.IsSuccessStatusCode) return;
+
+            var json = await resp.Content.ReadAsStringAsync();
+            var obj = Newtonsoft.Json.Linq.JObject.Parse(json);
+            var tag = (string?)obj["tag_name"];
+            if (string.IsNullOrWhiteSpace(tag) || !Version.TryParse(tag.TrimStart('v', 'V'), out var latest))
+                return;
+
+            // Compare Major.Minor.Build only (ignore revision); only flag a genuinely newer release.
+            var cur = new Version(current.Major, current.Minor, Math.Max(current.Build, 0));
+            var rem = new Version(latest.Major, latest.Minor, Math.Max(latest.Build, 0));
+            if (rem <= cur) return;
+
+            _updateUrl = (string?)obj["html_url"];
+            Dispatcher.BeginInvoke(() =>
+            {
+                UpdateLink.Text = $"⬆ Update available: v{rem.Major}.{rem.Minor}.{rem.Build} — click to download";
+                UpdateLink.Visibility = Visibility.Visible;
+            });
+        }
+        catch { /* offline / rate-limited / shape change — fail silently, leave the link hidden */ }
+    }
+
+    private void UpdateLink_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (string.IsNullOrEmpty(_updateUrl)) return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(_updateUrl) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[Update] failed to open browser: {ex.Message}");
+        }
     }
 
     private void PopulateFields()
