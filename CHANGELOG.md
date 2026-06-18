@@ -4,6 +4,70 @@ All notable changes to **Poe Ancients Price Helper** are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] — 2026-06-18
+
+A ground-up performance and stability overhaul. The app now uses a fraction of the CPU it used to,
+captures frames via the GPU, and has been audited for race conditions and resource leaks.
+
+### Performance
+
+- **Windows Graphics Capture (WGC) backend** — screen capture now runs on the GPU via D3D11 +
+  WinRT interop (Vortice), cutting CPU usage dramatically compared to GDI `CopyFromScreen`.
+  Falls back to GDI automatically per-frame if WGC is unavailable. Configurable via
+  `CaptureBackend` in `config.json` (`"Auto"` / `"GDI"`).
+- **Overlay render skip** — the overlay no longer repaints every cycle; it only redraws when the
+  rows, panel state, or reading state actually change.
+- **Panel detection via LockBits** — `ListDetector` now uses `LockBits` + `Marshal.ReadByte`
+  instead of 60 individual `GetPixel` calls per pass.
+- **Resolution cache** — OCR'd names are resolved to price keys once, then cached (invalidated on
+  each price refresh). Skips the dictionary scan + Levenshtein work on every subsequent pass.
+- **Length-bucketed fuzzy index** — the fuzzy matcher only scans price keys within ±3 characters
+  of the OCR'd name length, not the entire dictionary.
+- **Conditional OCR** — the second Tesseract pass (SparseText) only runs when the first pass
+  (SingleColumn) found fewer than 3 rows, skipping its cost on normal panels.
+- **Pre-compiled regexes** — all `Regex` instances in the hot path are now `static readonly`
+  with `RegexOptions.Compiled`.
+- **Parallel price fetch** — all exchange types are fetched concurrently via `Task.WhenAll`
+  instead of sequentially.
+
+### OCR improvements
+
+- **3x upscaling** (was 2x) — more pixels per glyph means Tesseract reads names correctly on the
+  first pass more often, so prices appear faster.
+- **80ms OCR interval** (was 100ms) — more attempts per second while a panel is open.
+- **High-confidence fuzzy lock** — fuzzy matches with similarity ≥ 0.92 now lock in 1 read
+  instead of 2, halving the time for near-exact matches to appear. The acceptance threshold
+  remains at 0.84 — no new false positives.
+
+### Stability
+
+- **Overlay concurrency fixes** — `PriceOverlayManager` no longer holds a lock across cross-thread
+  UI dispatches (deadlock risk), and all UI calls are wrapped in try/catch for
+  `ObjectDisposedException` / `InvalidOperationException`.
+- **League-switch lifecycle** — changing leagues now stops and disposes the scanner before
+  reloading prices/icons, with a reentrancy guard to prevent overlapping reloads.
+- **Race condition fix** — `PriceRepository._keysByLength` is now `volatile`, and
+  `PriceGeneration` uses `Interlocked.Increment` / `Volatile.Read` to prevent torn reads when the
+  background refresh overlaps the scan loop.
+- **WGC resource management** — COM reference leaks fixed in `GraphicsCaptureItem` creation and
+  `ID3D11Texture2D` frame access. Frame pool is recreated on monitor resolution change. WGC
+  permanently falls back to GDI if initialization fails (no retry storm).
+
+### Code quality (YAGNI)
+
+- Removed dead code: `ScreenCapture.cs`, `IsAllBlack`, `ReferencePixelColor`, `MemeKind` easter
+  eggs (Mirror of Kalandra / Headhunter icons and detection).
+- Unified duplicate `NormalizeName` into a single `NameNormalizer` helper.
+- Simplified `ListDetector` to return only the sampled color (threshold logic lives in `ScanEngine`).
+- Extracted `WithForm(...)` helper in `PriceOverlayManager` to eliminate 5× duplicated lock+try/catch.
+- Extracted `DisposeDevice()` in `WgcScreenCaptureBackend` to eliminate duplicated teardown.
+
+### Dependencies
+
+- Target framework bumped to `net10.0-windows10.0.19041.0` (.NET 10 LTS).
+- All NuGet packages updated to latest stable.
+- Added `Vortice.Direct3D11` and `Vortice.DXGI` for WGC interop.
+
 ## [1.1.8] — 2026-06-14
 
 ### Fixed
@@ -96,6 +160,7 @@ First public release.
 - One-time calibration; stack-aware pricing (e.g. `2 (0.5 each)`).
 - Self-contained Windows x64 build.
 
+[2.0.0]: https://github.com/pedro-quiterio/PoeAncientsPriceHelper/releases/tag/v2.0.0
 [1.1.8]: https://github.com/pedro-quiterio/PoeAncientsPriceHelper/releases/tag/v1.1.8
 [1.1.7]: https://github.com/pedro-quiterio/PoeAncientsPriceHelper/releases/tag/v1.1.7
 [1.1.6]: https://github.com/pedro-quiterio/PoeAncientsPriceHelper/releases/tag/v1.1.6

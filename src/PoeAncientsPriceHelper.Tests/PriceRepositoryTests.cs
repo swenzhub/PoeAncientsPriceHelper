@@ -145,7 +145,7 @@ public class PriceRepositoryTests
     [InlineData("Rune-of-Aldur", "rune of aldur")]
     public void NormalizeName_ProducesConsistentKey(string input, string expected)
     {
-        Assert.Equal(expected, PriceRepository.NormalizeName(input));
+        Assert.Equal(expected, NameNormalizer.Normalize(input));
     }
 
     private static HttpClient FakeHttp(string responseJson)

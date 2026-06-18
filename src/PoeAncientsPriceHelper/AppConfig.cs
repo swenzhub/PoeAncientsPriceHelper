@@ -24,8 +24,9 @@ internal sealed class AppConfig
     public string StartStopHotkey { get; set; } = "VcF5";
     public string DebugHotkey { get; set; } = "VcF3";
     public string CalibrateHotkey { get; set; } = "VcF4";
-    public string ReferencePixelColor { get; set; } = "#000000"; // kept for JSON backwards compat, unused
     public string CustomPricesPath { get; set; } = "custom_prices.json";
+    // "GDI" forces legacy BitBlt; any other value uses WGC (GPU capture) with GDI fallback.
+    public string CaptureBackend { get; set; } = "Auto";
 
     public Rectangle RegionRect
     {

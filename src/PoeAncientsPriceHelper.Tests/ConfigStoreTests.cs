@@ -36,7 +36,6 @@ public class ConfigStoreTests
             LeagueName = "Test League",
             RegionX = 10, RegionY = 20, RegionWidth = 300, RegionHeight = 400,
             OverlayXOffset = 16,
-            ReferencePixelColor = "#AABBCC",
             CustomPricesPath = "my_prices.json"
         };
         SaveTo(dir.Path, original);
@@ -44,7 +43,6 @@ public class ConfigStoreTests
         Assert.Equal("Test League", loaded.LeagueName);
         Assert.Equal(new Rectangle(10, 20, 300, 400), loaded.RegionRect);
         Assert.Equal(16, loaded.OverlayXOffset);
-        Assert.Equal("#AABBCC", loaded.ReferencePixelColor);
         Assert.Equal("my_prices.json", loaded.CustomPricesPath);
     }
 
@@ -86,4 +84,3 @@ public class ConfigStoreTests
 
     private static void SaveTo(string dir, AppConfig cfg) => ConfigStore.Save(cfg, dir);
 }
-

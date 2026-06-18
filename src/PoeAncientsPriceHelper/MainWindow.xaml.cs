@@ -15,6 +15,11 @@ public partial class MainWindow : MetroWindow
     // default 100s. Per-fetch cancellation (shutdown) is handled inside PriceRepository.
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private bool _loading;
+    // Reentrancy guard for LeagueBox_SelectionChanged → StartupAsync (rapid league changes could
+    // otherwise overlap and dispose repo/icons mid-fetch). Also remembers whether the scanner was
+    // running before a league change so StartupAsync can restart it against the new repo/icons.
+    private bool _startingUp;
+    private bool _engineWasRunning;
 
     // Minimize-to-tray (#2). The window hides to a tray icon on minimize and restores from it; the X
     // button still fully exits. Scanning is independent of this window, so it keeps running in the tray.
@@ -129,6 +134,17 @@ public partial class MainWindow : MetroWindow
         StatusLabel.Text = "Fetching prices from poe.ninja…";
         StartStopButton.IsEnabled = false;
 
+        // Stop the scanner before disposing the repo/icons it depends on (league change, initial load).
+        // Otherwise a running ScanEngine keeps referencing the OLD repo (stale prices) and icons
+        // (disposed IconCache → crashes/stale icons).
+        _engineWasRunning = _engine is { IsRunning: true };
+        if (_engine is not null)
+        {
+            _engine.StopAndWait(TimeSpan.FromSeconds(2));
+            _engine.Dispose();
+            _engine = null;
+        }
+
         _repo?.Dispose();
         _icons?.Dispose();
 
@@ -144,6 +160,21 @@ public partial class MainWindow : MetroWindow
 
         UpdateStatusLabel();
         StartStopButton.IsEnabled = _config.IsCalibrated;
+
+        // If the scanner was running before the league change, restart it with the new repo/icons.
+        if (_engineWasRunning && _config.IsCalibrated)
+        {
+            _engine = new ScanEngine(_config, _repo, _icons, CreateCaptureBackend());
+            _engine.Start();
+            StartStopButton.Content = "Stop";
+            StartStopButton.Background = System.Windows.Media.Brushes.DarkRed;
+        }
+        else
+        {
+            StartStopButton.Content = "Start";
+            StartStopButton.Background = System.Windows.Media.Brushes.DarkGreen;
+        }
+        _engineWasRunning = false;
     }
 
     // The 30-min background refresh fires on a thread-pool thread — marshal to the UI thread
@@ -189,6 +220,13 @@ public partial class MainWindow : MetroWindow
 
     private void StartStopButton_Click(object sender, RoutedEventArgs e) => ToggleStartStop();
 
+    // Selects the screen-capture backend based on config. "GDI" forces legacy BitBlt;
+    // "Auto"/"WGC" use Windows Graphics Capture (GPU) with built-in GDI fallback per call.
+    private IScreenCaptureBackend CreateCaptureBackend() =>
+        _config.CaptureBackend == "GDI"
+            ? new GdiScreenCaptureBackend()
+            : new WgcScreenCaptureBackend();
+
     // Shared by the Start/Stop button and the configurable global hotkey (invoked via App, marshalled
     // to the UI thread). internal so the App-level hook can reach it.
     internal void ToggleStartStop()
@@ -197,7 +235,7 @@ public partial class MainWindow : MetroWindow
         {
             // The hotkey can fire even when the button is disabled — don't start until we're ready.
             if (!_config.IsCalibrated || _repo is null || _icons is null) return;
-            _engine = new ScanEngine(_config, _repo, _icons);
+            _engine = new ScanEngine(_config, _repo, _icons, CreateCaptureBackend());
             _engine.Start();
             StartStopButton.Content = "Stop";
             StartStopButton.Background = System.Windows.Media.Brushes.DarkRed;
@@ -277,9 +315,20 @@ public partial class MainWindow : MetroWindow
     private async void LeagueBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (_loading || LeagueBox.SelectedItem is not string league || league == _config.LeagueName) return;
-        _config.LeagueName = league;
-        ConfigStore.Save(_config);
-        await StartupAsync();   // re-fetch prices for the newly selected league
+        if (_startingUp) return;  // prevent overlapping StartupAsync calls (rapid league changes)
+        _startingUp = true;
+        try
+        {
+            LeagueBox.IsEnabled = false;  // disable during reload
+            _config.LeagueName = league;
+            ConfigStore.Save(_config);
+            await StartupAsync();   // re-fetch prices for the newly selected league
+        }
+        finally
+        {
+            LeagueBox.IsEnabled = true;
+            _startingUp = false;
+        }
     }
 
     // The rebind in progress: which action, and the button/label to update. Only one runs at a time.

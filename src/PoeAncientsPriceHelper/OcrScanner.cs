@@ -8,22 +8,31 @@ internal sealed record OcrRow(string NormalizedName, string RawText, int CenterY
 
 internal sealed class OcrScanner : IDisposable
 {
-    // Two independent engines so the two segmentation passes can run concurrently — Tesseract
-    // engines are single-threaded internally, but separate instances on separate threads are fine.
+    // Two engines because each is configured for a different page-segmentation mode (SingleColumn
+    // vs SparseText). They run SEQUENTIALLY now — SingleColumn first, SparseText only as a fallback
+    // when SingleColumn found few rows — but Tesseract engines are single-threaded internally, so
+    // keeping separate instances means each keeps its own mode set without reconfiguring per pass.
     private readonly TesseractEngine _engineCol;
     private readonly TesseractEngine _engineSparse;
     private readonly Action<string>? _log;
     private readonly bool _debug;
-    private readonly object _logLock = new();
     private const float MinConfidence = 10f;
-    private const int UpscaleFactor = 2;
+    private const int UpscaleFactor = 3;
     private const int MinNameLength = 4;
     // A real row must contain a word at least this long. 4 (not 5) so two-short-word names
     // like "Void Flux" survive; OCR fragments are still mostly 1–3 char tokens.
     private const int MinWordLength = 4;
 
-    // debug gates the diagnostic debug_ocr.png dump (see Scan). The flag is injected rather than
-    // read from App.DebugMode so this engine-level type stays free of UI/app statics.
+    // Pre-compiled regexes for StripLeadingNoise / ExtractMultiplier — these run on every OCR'd
+    // line (~every 100ms while a panel is open), so avoiding the per-call recompile is a meaningful
+    // saving on the hot path. (NormalizeName's regexes live in NameNormalizer.)
+    private static readonly Regex MultiplierPattern = new(@"(?<![a-z0-9])(\d{1,3})\s*x(?![a-z0-9])", RegexOptions.Compiled);
+    private static readonly Regex LeadingNoise = new(@"^(?:\S{1,2}\s+|\S*\d\S*\s+)+", RegexOptions.Compiled);
+    private static readonly Regex QuantityMarker = new(@"(?<!\w)\d+\s*x\s+", RegexOptions.Compiled);
+    private static readonly Regex LeadingNonAlpha = new(@"^[^a-z]+", RegexOptions.Compiled);
+
+    // debug gates the diagnostic debug_ocr.png dump (see Scan) and CLI OCR-test raw-line logging.
+    // App.DebugMode additionally enables raw-line logging for the live overlay when toggled at runtime.
     public OcrScanner(string tessdataDir, Action<string>? log = null, bool debug = false)
     {
         _engineCol = new TesseractEngine(tessdataDir, "eng", EngineMode.Default);
@@ -51,14 +60,22 @@ internal sealed class OcrScanner : IDisposable
         byte[] png = ToPng(upscaled);
         int height = regionBitmap.Height;
 
-        // Two segmentation passes merged by row position, run CONCURRENTLY (one engine each) to
-        // halve latency. SingleColumn reads ordinary lists cleanly; SparseText rescues panels whose
-        // strong beveled row dividers make the other modes see only the top line. At each row keep
-        // whichever pass produced the fuller text.
-        var tCol = Task.Run(() => RunPass(_engineCol, png, PageSegMode.SingleColumn, height));
-        var tSparse = Task.Run(() => RunPass(_engineSparse, png, PageSegMode.SparseText, height));
-        Task.WaitAll(tCol, tSparse);
-        var rows = MergeByPosition(tCol.Result, tSparse.Result);
+        // Run SingleColumn first; only fall back to SparseText if it found few rows. SingleColumn
+        // reads ordinary lists cleanly; SparseText rescues panels whose strong beveled row dividers
+        // make the other modes see only the top line. On a normal panel SingleColumn alone is
+        // enough, so we skip the second pass (and its cost) most of the time — running the passes
+        // sequentially is fine because the second only runs when the first was poor.
+        var colRows = RunPass(_engineCol, png, PageSegMode.SingleColumn, height);
+        IReadOnlyList<OcrRow> rows;
+        if (colRows.Count >= 3)
+        {
+            rows = colRows;
+        }
+        else
+        {
+            var sparseRows = RunPass(_engineSparse, png, PageSegMode.SparseText, height);
+            rows = MergeByPosition(colRows, sparseRows);
+        }
 
         // When OCR catches few rows, dump the exact image fed to Tesseract for inspection. Debug-only:
         // for end users this would be needless disk churn (~every 100ms while a panel mis-detects).
@@ -106,7 +123,7 @@ internal sealed class OcrScanner : IDisposable
     private IReadOnlyList<OcrRow> ExtractRows(Page page, int bitmapHeight, int scale = 1)
     {
         var rows = new List<OcrRow>();
-        var diag = new List<string>();
+        List<string>? diag = ShouldLogOcrDiagnostics ? [] : null;
         using var iter = page.GetIterator();
         iter.Begin();
         do
@@ -124,7 +141,7 @@ internal sealed class OcrScanner : IDisposable
             else if (conf < MinConfidence) reject = "lowconf";
             else
             {
-                var normalizedRaw = NormalizeName(text);
+                var normalizedRaw = NameNormalizer.Normalize(text);
                 multiplier = ExtractMultiplier(normalizedRaw);
                 normalized = StripLeadingNoise(normalizedRaw);
                 if (normalized.Length < MinNameLength) reject = "short";
@@ -133,15 +150,14 @@ internal sealed class OcrScanner : IDisposable
 
             if (reject is null)
                 rows.Add(new OcrRow(normalized, text.Trim(), centerY, multiplier));
-            diag.Add($"y={centerY} conf={conf:0} '{(text ?? "").Trim()}'{(reject is null ? "" : $" REJ:{reject}")}");
+            diag?.Add($"y={centerY} conf={conf:0} '{(text ?? "").Trim()}'{(reject is null ? "" : $" REJ:{reject}")}");
         }
         while (iter.Next(PageIteratorLevel.TextLine));
 
         // Diagnostic: when few rows survive, show every line Tesseract actually produced so we
         // can tell "Tesseract only saw 1 line" from "saw 5 but the filters dropped 4".
-        // Runs on a pass thread — serialize so two concurrent passes don't race the logger.
-        if (rows.Count <= 2 && diag.Count > 0)
-            lock (_logLock) { _log?.Invoke($"OCR raw {diag.Count} lines → " + string.Join(" | ", diag)); }
+        if (rows.Count <= 2 && diag is { Count: > 0 })
+            _log?.Invoke($"OCR raw {diag.Count} lines → " + string.Join(" | ", diag));
 
         return rows;
     }
@@ -160,7 +176,7 @@ internal sealed class OcrScanner : IDisposable
     // normalized string BEFORE StripLeadingNoise removes the marker. Returns 1 when absent.
     internal static int ExtractMultiplier(string normalized)
     {
-        var m = Regex.Match(normalized, @"(?<![a-z0-9])(\d{1,3})\s*x(?![a-z0-9])");
+        var m = MultiplierPattern.Match(normalized);
         if (m.Success && int.TryParse(m.Groups[1].Value, out var n) && n >= 1)
             return Math.Min(n, 999);
         return 1;
@@ -172,11 +188,11 @@ internal sealed class OcrScanner : IDisposable
     // e.g. "e l8 n 1x the greatwolf"          → "the greatwolf"
     internal static string StripLeadingNoise(string normalized)
     {
-        var s = Regex.Replace(normalized, @"^(?:\S{1,2}\s+|\S*\d\S*\s+)+", "");
+        var s = LeadingNoise.Replace(normalized, "");
         // If a quantity marker still exists, drop everything before (and including) it
-        var qm = Regex.Match(s, @"(?<!\w)\d+\s*x\s+");
+        var qm = QuantityMarker.Match(s);
         if (qm.Success) s = s.Substring(qm.Index + qm.Length);
-        s = Regex.Replace(s, @"^[^a-z]+", "");
+        s = LeadingNonAlpha.Replace(s, "");
         return s.Trim();
     }
 
@@ -224,13 +240,7 @@ internal sealed class OcrScanner : IDisposable
         return ms.ToArray();
     }
 
-    internal static string NormalizeName(string text)
-    {
-        var s = text.ToLowerInvariant();
-        s = Regex.Replace(s, @"[^\w\s]", " ");
-        s = Regex.Replace(s, @"\s+", " ");
-        return s.Trim();
-    }
+    private bool ShouldLogOcrDiagnostics => _log is not null && (_debug || App.DebugMode);
 
     public void Dispose() { _engineCol.Dispose(); _engineSparse.Dispose(); }
 }

@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
@@ -14,7 +14,7 @@
     <AssemblyTitle>Poe Ancients Price Helper</AssemblyTitle>
     <Product>Poe Ancients Price Helper</Product>
     <Description>Screen overlay for Path of Exile 2 that OCRs the currency-exchange panel and shows live poe.ninja prices.</Description>
-    <Version>1.1.8</Version>
+    <Version>2.0.0</Version>
     <Authors>pedro</Authors>
     <Company>pedro</Company>
     <Copyright>Copyright © 2026 pedro</Copyright>
@@ -29,11 +29,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="MahApps.Metro" Version="2.4.10" />
+    <PackageReference Include="MahApps.Metro" Version="2.4.11" />
     <PackageReference Include="SharpHook" Version="7.1.2" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
     <PackageReference Include="Tesseract.Data.English" Version="4.0.0" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
   </ItemGroup>
 
 

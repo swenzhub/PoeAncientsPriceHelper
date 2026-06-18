@@ -8,10 +8,18 @@ internal sealed class ScanEngine : IDisposable
     private readonly AppConfig _config;
     private readonly PriceRepository _prices;
     private readonly IconCache _icons;
+    private readonly IScreenCaptureBackend _capture;
     private CancellationTokenSource? _cts;
     private Task? _loopTask;
     private Dictionary<string, int> _lastPositions = new();
     private string _logPath = "";
+
+    // Resolution cache for the exact → prefix → fuzzy chain in BuildPriceRows. The same OCR'd
+    // names recur on every pass while a panel is open, so caching the resolved price key (or a
+    // recorded miss) skips the dictionary scan + Levenshtein work on all but the first pass.
+    // Invalidated wholesale when the price snapshot changes (tracked via PriceGeneration).
+    private int _cachedPriceGeneration = -1;
+    private readonly Dictionary<string, string?> _resolutionCache = new();
 
     // Shared with the global hotkey hook (App). The loop owns the detection state, so the hook
     // only sets a "dismissed" latch; the loop reads it and keeps the overlay hidden.
@@ -28,11 +36,12 @@ internal sealed class ScanEngine : IDisposable
     // dismissed without flickering until the user closes the panel themselves).
     public static void RequestDismiss() => _dismissed = true;
 
-    public ScanEngine(AppConfig config, PriceRepository prices, IconCache icons)
+    public ScanEngine(AppConfig config, PriceRepository prices, IconCache icons, IScreenCaptureBackend capture)
     {
         _config = config;
         _prices = prices;
         _icons = icons;
+        _capture = capture;
     }
 
     public void Start()
@@ -53,15 +62,21 @@ internal sealed class ScanEngine : IDisposable
 
     private void Log(string msg)
     {
+        // File logging is debug-only: in normal use the loop fires ~10×/s and would otherwise
+        // churn the log file continuously (a real cost on the hot path).
+        if (!App.DebugMode) return;
         var line = $"[{DateTime.Now:HH:mm:ss.fff}] {msg}";
         try { File.AppendAllText(_logPath, line + "\n"); } catch { }
-        if (App.DebugMode) Console.WriteLine(line);
+        Console.WriteLine(line);
     }
 
     private async Task RunLoopAsync(CancellationToken ct)
     {
+        // Keep _logPath assigned even when not debugging so Log() never throws on a null/empty
+        // path; only truncate the file when debug logging is actually enabled.
         _logPath = Path.Combine(AppContext.BaseDirectory, "scan_log.txt");
-        File.WriteAllText(_logPath, "");
+        if (App.DebugMode)
+            File.WriteAllText(_logPath, "");
 
         var tessdataDir = Path.Combine(AppContext.BaseDirectory, "tessdata");
         if (!Directory.Exists(tessdataDir))
@@ -77,6 +92,12 @@ internal sealed class ScanEngine : IDisposable
         var sw = Stopwatch.StartNew();
         var slots = new List<RowSlot>();             // per-row accumulator: priced rows lock, misses keep retrying
         IReadOnlyList<PriceRow> lastRows = [];       // what the overlay shows
+        // Last state actually pushed to the overlay. The loop ticks ~10×/s but the displayed rows
+        // only change when OCR resolves something new, so skipping UpdateState when nothing changed
+        // avoids needless cross-thread marshalling / repaints on the hot path.
+        IReadOnlyList<PriceRow> lastPushedRows = [];
+        bool lastPushedConfirmed = false;
+        bool lastPushedReading = false;
         int topmostCounter = 0;
         const int TopmostEveryN = 10;
         bool isOpen = false;          // brightness gate: bright enough to attempt OCR
@@ -92,7 +113,7 @@ internal sealed class ScanEngine : IDisposable
         int dismissDark = 0;          // dark frames seen while dismissed — releases the latch when the panel closes
         int cycleCount = 0;
         var lastOcrAt = DateTime.MinValue;
-        const int MinOcrIntervalMs = 100;            // OCR floor while panel is open — fast price turnaround
+        const int MinOcrIntervalMs = 80;             // OCR floor while panel is open — fast price turnaround
         const int OpenCycleMs = 100;                 // tight loop while scanning
         const int ClosedCycleMs = 150;               // polling while watching for the panel — snappy detection
         const int DarkToRelease = 3;                 // dark frames before a dismiss latch releases
@@ -113,8 +134,8 @@ internal sealed class ScanEngine : IDisposable
             cycleCount++;
             try
             {
-                using var bmp = ScreenCapture.CaptureRegion(_config.RegionRect);
-                detector.IsOpen(bmp, out var sampledPixel);   // bool unused — we apply our own hysteresis
+                using var bmp = _capture.CaptureRegion(_config.RegionRect);
+                var sampledPixel = detector.SampleAverage(bmp);
                 int brightness = (sampledPixel.R + sampledPixel.G + sampledPixel.B) / 3;
                 bool brightFrame = brightness > OpenBrightness;   // strong enough to count toward opening
                 bool darkFrame = brightness < CloseBrightness;    // dim enough to count toward closing
@@ -136,7 +157,10 @@ internal sealed class ScanEngine : IDisposable
                     isOpen = false; confirmedOpen = false; brightStreak = 0; darkStreak = 0;
                     slots.Clear(); lastRows = [];
                     _showing = false;
+                    // Always push when dismissed to clear the overlay, and reset the change-tracker
+                    // so the next real state is treated as new.
                     PriceOverlayManager.UpdateState([], false, false);
+                    lastPushedRows = []; lastPushedConfirmed = false; lastPushedReading = false;
                 }
                 else
                 {
@@ -222,7 +246,15 @@ internal sealed class ScanEngine : IDisposable
 
                     // Show prices only once OCR has confirmed a real list, not on brightness alone.
                     _showing = confirmedOpen;
-                    PriceOverlayManager.UpdateState(lastRows, confirmedOpen, reading);
+                    // Skip the cross-thread UpdateState when nothing actually changed since the last
+                    // push — the loop ticks far faster than the displayed rows move.
+                    if (!lastRows.SequenceEqual(lastPushedRows) || confirmedOpen != lastPushedConfirmed || reading != lastPushedReading)
+                    {
+                        PriceOverlayManager.UpdateState(lastRows, confirmedOpen, reading);
+                        lastPushedRows = lastRows.ToArray();
+                        lastPushedConfirmed = confirmedOpen;
+                        lastPushedReading = reading;
+                    }
 
                     topmostCounter++;
                     if (topmostCounter >= TopmostEveryN)
@@ -257,6 +289,14 @@ internal sealed class ScanEngine : IDisposable
         var rows = new List<PriceRow>(ocrRows.Count);
         var newPositions = new Dictionary<string, int>(ocrRows.Count);
 
+        // Invalidate the resolution cache when the price snapshot changed since the last build.
+        // (Gem rows below are resolved independently and are NOT cached.)
+        if (_prices.PriceGeneration != _cachedPriceGeneration)
+        {
+            _cachedPriceGeneration = _prices.PriceGeneration;
+            _resolutionCache.Clear();
+        }
+
         foreach (var row in ocrRows)
         {
             if (row.NormalizedName.Contains("runeshape"))
@@ -286,21 +326,6 @@ internal sealed class ScanEngine : IDisposable
                 continue;
             }
 
-            // Easter eggs: certain OCR'd names render as a gag icon + caption instead of a price.
-            // ExactMatch=true so they lock on the first read like a real priced row.
-            //   "5x random currency" (the "5x" is stripped into the multiplier, leaving "random
-            //    currency") → Mirror of Kalandra. "unique belt" → Headhunter.
-            if (row.NormalizedName.Contains("random") && row.NormalizedName.Contains("currency"))
-            {
-                rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, true, row.Multiplier, "random currency", true, MemeKind.Mirror));
-                continue;
-            }
-            if (row.NormalizedName.Contains("unique") && row.NormalizedName.Contains("belt"))
-            {
-                rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, true, row.Multiplier, "unique belt", true, MemeKind.Headhunter));
-                continue;
-            }
-
             // Resolve the OCR'd name to a price key: exact → prefix → fuzzy (edit distance).
             // The fuzzy step rescues single-character misreads ("viswn" → "vision"). The matched
             // key (not the noisy OCR text) is stored as the row Name so the same item locks even
@@ -308,22 +333,49 @@ internal sealed class ScanEngine : IDisposable
             PriceEntry? entry;
             string matchedKey = row.NormalizedName;
             bool exact = false;
-            if (snapshot.TryGetValue(row.NormalizedName, out entry))
+            if (_resolutionCache.TryGetValue(row.NormalizedName, out var cachedKey))
             {
-                exact = true;
+                // Reuse a previously resolved key (or a recorded miss). The same OCR'd names recur
+                // on every pass while a panel is open, so this skips the dict scan + Levenshtein
+                // work on all but the first pass. exact is true only when the resolved key IS the
+                // OCR'd name itself (a direct dictionary hit) — prefix/fuzzy keys must stay non-exact
+                // so they still need a second confirming read before locking.
+                if (cachedKey is not null && snapshot.TryGetValue(cachedKey, out entry))
+                {
+                    matchedKey = cachedKey;
+                    exact = cachedKey == row.NormalizedName;
+                }
+                else
+                {
+                    entry = null;   // cached miss
+                }
             }
-            else if (row.NormalizedName.Length >= 10 &&
-                     snapshot.Keys.Where(k => k.StartsWith(row.NormalizedName, StringComparison.Ordinal))
-                                  .MinBy(k => k.Length) is { } prefixKey)
+            else
             {
-                entry = snapshot[prefixKey];
-                matchedKey = prefixKey;
-            }
-            else if (row.NormalizedName.Length >= 6 &&
-                     BestFuzzy(snapshot, row.NormalizedName) is { } fuzzy)
-            {
-                entry = snapshot[fuzzy];
-                matchedKey = fuzzy;
+                if (snapshot.TryGetValue(row.NormalizedName, out entry))
+                {
+                    exact = true;
+                }
+                else if (row.NormalizedName.Length >= 10 &&
+                         snapshot.Keys.Where(k => k.StartsWith(row.NormalizedName, StringComparison.Ordinal))
+                                      .MinBy(k => k.Length) is { } prefixKey)
+                {
+                    entry = snapshot[prefixKey];
+                    matchedKey = prefixKey;
+                }
+                else if (row.NormalizedName.Length >= 6 &&
+                         BestFuzzy(snapshot, _prices.KeysByLength, row.NormalizedName) is { } fuzzy &&
+                         snapshot.TryGetValue(fuzzy.Key, out entry))
+                {
+                    matchedKey = fuzzy.Key;
+                    exact = fuzzy.Score >= HighConfidenceThreshold;
+                }
+                else
+                {
+                    entry = null;
+                }
+                // Cache the resolution: the matched key, or null to record a miss.
+                _resolutionCache[row.NormalizedName] = entry != null ? matchedKey : null;
             }
 
             if (entry != null)
@@ -335,26 +387,44 @@ internal sealed class ScanEngine : IDisposable
         return rows;
     }
 
+    // Pre-compiled regexes for gem detection (TryResolveGemKey runs on every OCR'd line).
+    private static readonly Regex GemTypePattern = new(@"\b(skill|spirit|support)\b", RegexOptions.Compiled);
+    private static readonly Regex GemLevelPattern = new(@"\blevel\s+(\d+)\b", RegexOptions.Compiled);
+
     // Minimum character-similarity (1 - editDistance/maxLen) for a fuzzy price match.
     // 0.84 lets ~2 wrong characters through on a 12+ char name, 1 on a ~6 char name —
     // enough to absorb typical OCR slips without matching an unrelated item.
     private const double FuzzyThreshold = 0.84;
+    // Fuzzy matches at or above this score are trusted as much as exact matches (lock in 1 read
+    // instead of 2). At 0.92 the edit distance is ≤1 char on a 12+ char name — a false positive
+    // at this level is virtually impossible.
+    private const double HighConfidenceThreshold = 0.92;
 
     // Closest price key to an OCR'd name by Levenshtein similarity, or null if nothing clears
     // FuzzyThreshold. Only candidates within ±3 of the name's length are considered (cheaper,
-    // and a large length gap is never a near-match).
-    private static string? BestFuzzy(IReadOnlyDictionary<string, PriceEntry> snapshot, string name)
+    // and a large length gap is never a near-match). The length-bucketed index avoids iterating
+    // every key in the snapshot — we walk only the buckets near the name's length.
+    // Returns the matched key AND its similarity score so the caller can trust high-confidence
+    // matches (≥ HighConfidenceThreshold) as if they were exact.
+    private static (string Key, double Score)? BestFuzzy(
+        IReadOnlyDictionary<string, PriceEntry> snapshot,
+        IReadOnlyDictionary<int, List<string>> keysByLength,
+        string name)
     {
         string? best = null;
         double bestScore = FuzzyThreshold;   // must strictly exceed the threshold to win
-        foreach (var key in snapshot.Keys)
+        // Only check keys within ±3 of the name's length, using the pre-built index.
+        for (int len = Math.Max(0, name.Length - 3); len <= name.Length + 3; len++)
         {
-            if (Math.Abs(key.Length - name.Length) > 3) continue;
-            int dist = Levenshtein(name, key);
-            double score = 1.0 - (double)dist / Math.Max(name.Length, key.Length);
-            if (score > bestScore) { bestScore = score; best = key; }
+            if (!keysByLength.TryGetValue(len, out var keys)) continue;
+            foreach (var key in keys)
+            {
+                int dist = Levenshtein(name, key);
+                double score = 1.0 - (double)dist / Math.Max(name.Length, key.Length);
+                if (score > bestScore) { bestScore = score; best = key; }
+            }
         }
-        return best;
+        return best is not null ? (best, bestScore) : null;
     }
 
     // Detect an uncut gem and pin its identity. Returns true when the name is an uncut gem (a type
@@ -367,9 +437,9 @@ internal sealed class ScanEngine : IDisposable
     {
         key = null;
         if (!normalizedName.Contains("gem")) return false;
-        var type = Regex.Match(normalizedName, @"\b(skill|spirit|support)\b");
+        var type = GemTypePattern.Match(normalizedName);
         if (!type.Success) return false;
-        var lvl = Regex.Match(normalizedName, @"\blevel\s+(\d+)\b");
+        var lvl = GemLevelPattern.Match(normalizedName);
         if (lvl.Success) key = $"uncut {type.Groups[1].Value} gem level {lvl.Groups[1].Value}";
         return true;
     }
@@ -494,5 +564,6 @@ internal sealed class ScanEngine : IDisposable
     {
         StopAndWait(TimeSpan.FromSeconds(2));
         _cts?.Dispose();
+        _capture.Dispose();
     }
 }

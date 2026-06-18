@@ -22,13 +22,9 @@ public class IconCacheTests
         Assert.True(cache.IsAvailable);
         Assert.NotNull(cache.Divine);
         Assert.NotNull(cache.Exalted);
-        Assert.NotNull(cache.Mirror);
-        Assert.NotNull(cache.Headhunter);
         Assert.True(File.Exists(Path.Combine(dir.Path, "divine.png")));
         Assert.True(File.Exists(Path.Combine(dir.Path, "exalted.png")));
-        Assert.True(File.Exists(Path.Combine(dir.Path, "mirror.png")));
-        Assert.True(File.Exists(Path.Combine(dir.Path, "headhunter.png")));
-        Assert.Equal(4, handler.RequestCount);
+        Assert.Equal(2, handler.RequestCount);
     }
 
     [Fact]
@@ -37,8 +33,6 @@ public class IconCacheTests
         using var dir = new TempDir();
         File.WriteAllBytes(Path.Combine(dir.Path, "divine.png"), FakePng);
         File.WriteAllBytes(Path.Combine(dir.Path, "exalted.png"), FakePng);
-        File.WriteAllBytes(Path.Combine(dir.Path, "mirror.png"), FakePng);
-        File.WriteAllBytes(Path.Combine(dir.Path, "headhunter.png"), FakePng);
 
         var handler = new CountingFakeHttpHandler(FakePng);
         using var http = new HttpClient(handler);
@@ -72,4 +66,3 @@ public class IconCacheTests
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==");
     }
 }
-

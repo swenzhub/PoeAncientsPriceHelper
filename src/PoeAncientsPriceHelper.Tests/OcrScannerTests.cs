@@ -12,19 +12,19 @@ public class OcrScannerTests
     [InlineData("Rune-of-Aldur", "rune of aldur")]
     public void NormalizeName_ProducesExpectedKey(string input, string expected)
     {
-        Assert.Equal(expected, OcrScanner.NormalizeName(input));
+        Assert.Equal(expected, NameNormalizer.Normalize(input));
     }
 
     [Fact]
     public void NormalizeName_EmptyAfterStrip_ReturnsEmpty()
     {
-        Assert.Equal("", OcrScanner.NormalizeName(":::---"));
+        Assert.Equal("", NameNormalizer.Normalize(":::---"));
     }
 
     [Fact]
     public void NormalizeName_CollapseWhitespace()
     {
-        Assert.Equal("a b c", OcrScanner.NormalizeName("a   b   c"));
+        Assert.Equal("a b c", NameNormalizer.Normalize("a   b   c"));
     }
 
     [Theory]

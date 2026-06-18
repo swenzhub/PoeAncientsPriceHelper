@@ -14,53 +14,35 @@ public class ListDetectorTests
     }
 
     [Fact]
-    public void IsOpen_True_WhenStripIsBright()
+    public void SampleAverage_ReturnsBrightStripAverage()
     {
         var detector = new ListDetector();
         using var bmp = SolidBitmap(100, 100, Color.FromArgb(187, 179, 162)); // #BBB3A2 — alloy panel
-        Assert.True(detector.IsOpen(bmp));
+        var avg = detector.SampleAverage(bmp);
+        Assert.Equal(187, avg.R);
+        Assert.Equal(179, avg.G);
+        Assert.Equal(162, avg.B);
     }
 
     [Fact]
-    public void IsOpen_True_WhenStripIsMediumBright()
+    public void SampleAverage_ReturnsMediumBrightStripAverage()
     {
         var detector = new ListDetector();
         using var bmp = SolidBitmap(100, 100, Color.FromArgb(116, 103, 84)); // #746754 — rune panel, brightness 101
-        Assert.True(detector.IsOpen(bmp));
+        var avg = detector.SampleAverage(bmp);
+        Assert.Equal(116, avg.R);
+        Assert.Equal(103, avg.G);
+        Assert.Equal(84, avg.B);
     }
 
     [Fact]
-    public void IsOpen_False_WhenStripIsDark()
+    public void SampleAverage_ReturnsDarkStripAverage()
     {
         var detector = new ListDetector();
         using var bmp = SolidBitmap(100, 100, Color.FromArgb(6, 6, 6)); // game world terrain
-        Assert.False(detector.IsOpen(bmp));
-    }
-
-    [Fact]
-    public void IsOpen_False_WhenBrightnessJustBelowThreshold()
-    {
-        var detector = new ListDetector();
-        using var bmp = SolidBitmap(100, 100, Color.FromArgb(87, 87, 87)); // brightness 87, below 88
-        Assert.False(detector.IsOpen(bmp));
-    }
-
-    [Fact]
-    public void IsOpen_False_WhenStripIsBlack()
-    {
-        var detector = new ListDetector();
-        using var bmp = SolidBitmap(100, 100, Color.Black);
-        Assert.False(detector.IsOpen(bmp));
-    }
-
-    [Fact]
-    public void IsOpen_ReturnsSampledAvg()
-    {
-        var detector = new ListDetector();
-        using var bmp = SolidBitmap(100, 100, Color.FromArgb(120, 120, 120));
-        Assert.True(detector.IsOpen(bmp, out var avg));
-        Assert.Equal(120, avg.R);
-        Assert.Equal(120, avg.G);
-        Assert.Equal(120, avg.B);
+        var avg = detector.SampleAverage(bmp);
+        Assert.Equal(6, avg.R);
+        Assert.Equal(6, avg.G);
+        Assert.Equal(6, avg.B);
     }
 }

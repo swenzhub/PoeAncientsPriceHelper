@@ -12,27 +12,29 @@ stack is worth.
 - **Uncut gems** (skill / spirit / support) priced by exact type **and level** — a row shows `?`
   rather than a guessed price if the gem type or level can't be read cleanly (neighbouring levels
   can differ several-fold, so a wrong-level price would be misleading).
-- **Update notifications** — checks GitHub on startup and shows a link in the app when a newer
-  release is available.
+- **GPU-accelerated capture** — uses Windows Graphics Capture (WGC) by default for low CPU usage,
+  with automatic fallback to legacy GDI if WGC is unavailable.
 - **Click-through overlay** that never gets in the way of the game.
 - **One-time calibration** — just drag a box around the in-game list panel.
-- **Hotkeys:** `F4` recalibrate · `F3` debug boxes · `Esc` / `Ctrl+Click` hide.
+- **Hotkeys:** `F5` start/stop · `F4` recalibrate · `F3` debug boxes · `Esc` / `Ctrl+Click` hide.
+- **Minimize to tray** — scanning keeps running in the background.
 
 ## Download & run
 
-Grab the latest `PoeAncientsPriceHelper-vX.Y.Z-win-x64.zip` from the
+Grab the latest release from the
 [**Releases**](../../releases) page, unzip it anywhere, and double-click **`Start.cmd`**.
 No install and no .NET runtime required — it's a self-contained Windows x64 build.
-
-Full usage instructions (with screenshots) are in the `README.html` included in the download.
 
 > Windows SmartScreen may warn that the app is unsigned — click **More info → Run anyway**.
 
 ## Build from source
 
-Requires the .NET 8 SDK.
+Requires the **.NET 10 SDK** and **Windows 10 version 2004+** / Windows 11.
 
 ```sh
+# restore + build
+dotnet build src/
+
 # run tests
 dotnet test src/PoeAncientsPriceHelper.Tests/
 
@@ -40,14 +42,31 @@ dotnet test src/PoeAncientsPriceHelper.Tests/
 dotnet publish src/PoeAncientsPriceHelper/ -c Release -r win-x64 --self-contained true -o publish
 ```
 
+## Capture backend
+
+The screen capture method is configurable via `config.json`:
+
+| Value | Description |
+|---|---|
+| `"Auto"` (default) | Uses WGC (GPU-based) with automatic GDI fallback per frame |
+| `"GDI"` | Forces legacy BitBlt capture (higher CPU, universal compatibility) |
+
+WGC requires Windows 10 2004+. If WGC fails at runtime, the app silently falls back to GDI without
+crashing.
+
 ## Tech
 
-WPF (settings window) + WinForms (overlay), Tesseract OCR, .NET 8 (`net8.0-windows`).
+- **.NET 10** (`net10.0-windows10.0.19041.0`) — WPF (settings window) + WinForms (overlay)
+- **Tesseract** OCR with 3x upscaling for glyph accuracy
+- **Windows Graphics Capture** via Vortice.Direct3D11 + WinRT interop
+- **poe.ninja** API for live price data (parallel fetch, 30-min auto-refresh)
+- **SharpHook** for global hotkeys
 
 ## Support
 
-If this tool saves you some alt-tabbing, there's a **☕ Buy me a coffee** button right in the app.
+If this tool saves you some alt-tabbing, there's a **Buy me a coffee** button right in the app.
 Thanks!
 
-## Disclaimer for those who seem to be troubled by it.. 
-Yes it was greatly helped by claude :D never the less it works and its free!
+## Disclaimer
+
+Yes it was greatly helped by AI :D nevertheless it works and it's free!
