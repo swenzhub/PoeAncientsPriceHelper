@@ -4,6 +4,26 @@ All notable changes to **Poe Ancients Price Helper** are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.0.1] — 2026-06-19
+
+### Fixed
+
+- **Overlay oversized / offset on a high-DPI secondary monitor** (#21) — on a multi-monitor setup
+  where PoE runs on a monitor at a non-100% display scale (e.g. 125%) while another monitor is at
+  100%, the price overlay (and the F3 debug boxes) were drawn ~1.25× too large and shifted. The v2.0
+  layered-window overlay composes its scene in physical pixels and blits via `UpdateLayeredWindow`,
+  which is only 1:1 if the overlay window is genuinely Per-Monitor-V2 aware; on the scaled monitor
+  its effective DPI context was lower, so DWM upscaled the whole bitmap. Capture/calibration use raw
+  physical APIs and were unaffected, so prices were read correctly but drawn in the wrong place. The
+  overlay thread now pins `PER_MONITOR_AWARE_V2` before its window is created, and the form opts out
+  of WinForms auto-scaling (`AutoScaleMode.None`). (Regression from the PR #20 rewrite; same class as
+  the mixed-DPI fix in #8.)
+
+### Packaging
+
+- **`debug.cmd`** added to the distributable — double-click to run with diagnostics (console + a
+  detailed `scan_log.txt`) for problem reports, without typing `--debug` by hand. README updated.
+
 ## [2.0.0] — 2026-06-19
 
 A ground-up performance and stability overhaul. The app now uses a fraction of the CPU it used to,

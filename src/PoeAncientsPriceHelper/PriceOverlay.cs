@@ -50,6 +50,10 @@ internal sealed class PriceOverlayForm : Form
         TopMost = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
+        // The scene is composed in absolute physical pixels and pushed via UpdateLayeredWindow, so
+        // WinForms' font-DPI auto-rescaling must not touch the form — None keeps it a passive
+        // physical-pixel canvas (works with the PMv2 thread context set in EnsureVisible). (#21)
+        AutoScaleMode = AutoScaleMode.None;
         Bounds = screenBounds;
         // Per-pixel alpha via UpdateLayeredWindow (see RenderLayered) — NOT color-key transparency,
         // so backdrops can be genuinely semi-transparent. Pixels are pushed manually; WM_PAINT is unused.
@@ -419,15 +423,34 @@ internal static class PriceOverlayManager
                 return;
             }
 
-            // Host the overlay on the monitor that contains the calibrated region (#3), not always the
-            // primary. Sized to just that monitor, so the per-frame layered bitmap stays one-monitor
-            // small (no perf regression) while prices land on the monitor PoE runs on.
-            var screen = Screen.FromRectangle(regionRect).Bounds;
             using var ready = new ManualResetEventSlim(false);
             _thread = new Thread(() =>
             {
+                // The overlay composes its scene in absolute PHYSICAL screen pixels and blits it via
+                // UpdateLayeredWindow — a 1:1 mapping that only holds if THIS window is genuinely
+                // Per-Monitor-V2 aware. If it lands on a >100% monitor with a lower effective DPI
+                // context, DWM upscales the whole layered bitmap (e.g. 1.25x on a 125% display: region
+                // box + prices drawn oversized and shifted — issue #21). Pin the context before the
+                // handle is created so the surface stays physical. The capture/calibration paths
+                // already use raw physical APIs, which is why only the overlay was affected.
+                SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+                // Host the overlay on the monitor that contains the calibrated region (#3), not always
+                // the primary. Sized to just that monitor, so the per-frame layered bitmap stays
+                // one-monitor small (no perf regression) while prices land on the monitor PoE runs on.
+                // Evaluated here (not on the caller) so it's read under the PMv2 context set above.
+                var screen = Screen.FromRectangle(regionRect).Bounds;
                 var f = new PriceOverlayForm(screen, regionRect, xOffset, icons);
-                f.Shown += (_, _) => ready.Set();
+                f.Shown += (_, _) =>
+                {
+                    // DPI diagnostics (debug-only): on the affected machine this confirms the window
+                    // ended up physical (GetDpiForWindow == 96) instead of virtualized. Kept for one
+                    // release so the 125%-monitor user can verify the fix without a 125% repro here.
+                    if (App.DebugMode)
+                        Console.WriteLine($"[overlay] region={regionRect} screen={screen} " +
+                            $"bounds={f.Bounds} dpiForWindow={GetDpiForWindow(f.Handle)}");
+                    ready.Set();
+                };
                 _form = f;
                 System.Windows.Forms.Application.Run(f);
                 lock (_lock) _form = null;
@@ -461,4 +484,14 @@ internal static class PriceOverlayManager
     public static void ToggleDebug() => WithForm(f => f.ToggleDebug());
 
     public static void HideNow() => WithForm(f => f.HideNow());
+
+    // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 — the pseudo-handle (-4). Windows 10 1607+,
+    // which the net10.0-windows10.0.19041.0 target guarantees.
+    private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new(-4);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
 }
