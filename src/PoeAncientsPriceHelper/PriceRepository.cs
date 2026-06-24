@@ -8,7 +8,8 @@ namespace PoeAncientsPriceHelper;
 
 // DivineValue  = price in divine orbs (primaryValue from API)
 // ExaltedValue = DivineValue * core.rates.exalted (computed, for display when < 1 divine)
-internal sealed record PriceEntry(decimal DivineValue, decimal ExaltedValue);
+// ChaosValue   = price in chaos orbs (computed from core.rates.chaos), shown alongside exalted
+internal sealed record PriceEntry(decimal DivineValue, decimal ExaltedValue, decimal ChaosValue);
 
 // Atomic snapshot of prices + length index, published together so the scan loop can never
 // see a new _prices with a stale _keysByLength (or vice versa) during a background refresh.
@@ -154,6 +155,9 @@ internal sealed class PriceRepository : IDisposable
             var rates = core?["rates"];
             var divinePerPrimary = primary == "divine" ? 1m : rates?["divine"]?.Value<decimal>() ?? 0m;
             var exaltedPerPrimary = primary == "exalted" ? 1m : rates?["exalted"]?.Value<decimal>() ?? 1m;
+            // chaos rate: how many chaos orbs equal 1 unit of the primary currency.
+            // Defaults to 0 when the rate is absent (e.g. some test responses or leagues without chaos data).
+            var chaosPerPrimary = primary == "chaos" ? 1m : rates?["chaos"]?.Value<decimal>() ?? 0m;
 
             if (obj["lines"] is not JArray lines) return result;
             foreach (var line in lines)
@@ -163,9 +167,10 @@ internal sealed class PriceRepository : IDisposable
                 var primaryValue = line["primaryValue"]?.Value<decimal>() ?? 0m;
                 var divineValue = primaryValue * divinePerPrimary;
                 var exaltedValue = Math.Round(primaryValue * exaltedPerPrimary, 1);
+                var chaosValue = Math.Round(primaryValue * chaosPerPrimary, 1);
                 var key = NameNormalizer.Normalize(name);
                 if (!string.IsNullOrEmpty(key))
-                    result[key] = new PriceEntry(divineValue, exaltedValue);
+                    result[key] = new PriceEntry(divineValue, exaltedValue, chaosValue);
             }
         }
         catch (Exception ex)
@@ -190,7 +195,7 @@ internal sealed class PriceRepository : IDisposable
             {
                 var key = NameNormalizer.Normalize(rawKey);
                 if (!string.IsNullOrEmpty(key))
-                    dict[key] = new PriceEntry(entry.DivineValue, entry.ExaltedValue);
+                    dict[key] = new PriceEntry(entry.DivineValue, entry.ExaltedValue, entry.ChaosValue);
             }
         }
         catch (Exception ex)
@@ -211,5 +216,6 @@ internal sealed class PriceRepository : IDisposable
     {
         public decimal DivineValue { get; set; }
         public decimal ExaltedValue { get; set; }
+        public decimal ChaosValue { get; set; }
     }
 }

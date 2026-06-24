@@ -17,7 +17,7 @@ namespace PoeAncientsPriceHelper;
 //   Headhunter — OCR'd "unique belt"        → Headhunter icon + "Headhunter!".
 internal enum MemeKind { None, Mirror, Headhunter }
 
-internal sealed record PriceRow(int CenterY, string OcrText, decimal DivineValue, decimal ExaltedValue, bool HasPrice, int Multiplier = 1, string Name = "", bool ExactMatch = false, MemeKind Meme = MemeKind.None);
+internal sealed record PriceRow(int CenterY, string OcrText, decimal DivineValue, decimal ExaltedValue, decimal ChaosValue, bool HasPrice, int Multiplier = 1, string Name = "", bool ExactMatch = false, MemeKind Meme = MemeKind.None);
 
 internal sealed class PriceOverlayForm : Form
 {
@@ -304,7 +304,24 @@ internal sealed class PriceOverlayForm : Form
             ? $"{total.ToString(fmt, inv)} ({unit.ToString(fmt, inv)} each)"
             : total.ToString(fmt, inv);
 
-        DrawBackdrop(g, x, screenY, IconSize + 2 + (int)Math.Ceiling(g.MeasureString(label, _priceFont).Width));
+        // Chaos section: shown alongside exalted when chaos rate is available.
+        string? chaosLabel = null;
+        if (!useDivine && row.ChaosValue > 0m)
+        {
+            decimal chaosUnit = row.ChaosValue;
+            decimal chaosTotal = chaosUnit * mult;
+            chaosLabel = mult > 1
+                ? $"{chaosTotal.ToString("0.#", inv)} ({chaosUnit.ToString("0.#", inv)} each)"
+                : chaosTotal.ToString("0.#", inv);
+        }
+
+        const int SectionGap = 8;
+        int primarySection = IconSize + 2 + (int)Math.Ceiling(g.MeasureString(label, _priceFont).Width);
+        int totalWidth = primarySection;
+        if (chaosLabel is not null)
+            totalWidth += SectionGap + IconSize + 2 + (int)Math.Ceiling(g.MeasureString(chaosLabel, _priceFont).Width);
+
+        DrawBackdrop(g, x, screenY, totalWidth);
         DrawIcon(g, useDivine ? _icons.Divine : _icons.Exalted, useDivine ? "d" : "ex", x, iconY);
 
         // Most valuable row → bright green; otherwise gold (divine) / white (exalted).
@@ -313,6 +330,16 @@ internal sealed class PriceOverlayForm : Form
         // Vertically center the (now smaller) text against the row, not the icon top.
         int textY = screenY - _priceFont.Height / 2;
         g.DrawString(label, _priceFont, brush, x + IconSize + 2, textY);
+
+        // Draw chaos price to the right of the exalted section.
+        if (chaosLabel is not null)
+        {
+            int chaosX = x + primarySection + SectionGap;
+            DrawIcon(g, _icons.Chaos, "c", chaosX, iconY);
+            var chaosColor = highlightTop ? Color.FromArgb(80, 255, 120) : Color.FromArgb(200, 160, 255); // light purple
+            using var chaosBrush = new SolidBrush(chaosColor);
+            g.DrawString(chaosLabel, _priceFont, chaosBrush, chaosX + IconSize + 2, textY);
+        }
     }
 
     // A rounded, semi-transparent slate plate behind the icon + price so they read clearly over busy
