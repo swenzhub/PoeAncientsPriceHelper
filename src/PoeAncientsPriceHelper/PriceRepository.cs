@@ -61,7 +61,7 @@ internal sealed class PriceRepository : IDisposable
     {
         _timer?.Dispose();
         _timer = new System.Threading.Timer(_ => Task.Run(() => FetchAndMergeAsync(config, _cts.Token)),
-            null, TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(30));
+            null, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(10));
     }
 
     private async Task FetchAndMergeAsync(AppConfig config, CancellationToken ct)

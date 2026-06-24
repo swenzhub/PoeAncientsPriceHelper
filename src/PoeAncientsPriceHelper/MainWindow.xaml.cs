@@ -58,7 +58,7 @@ public partial class MainWindow : MetroWindow
         await StartupAsync();
         // Fire-and-forget, once per launch (not inside StartupAsync, which re-runs on league change).
         // A slow/hung GitHub response must never delay the price fetch or the Start button.
-        _ = CheckForUpdatesAsync();
+        //_ = CheckForUpdatesAsync();
     }
 
     // Quietly check GitHub for a newer release on startup. On success with a higher version, show a

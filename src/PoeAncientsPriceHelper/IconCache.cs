@@ -16,7 +16,10 @@ internal sealed class IconCache : IDisposable
     private const string HeadhunterUrl =
         "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQmVsdHMvVW5pcXVlcy9IZWFkaHVudGVyIiwidyI6MiwiaCI6MSwic2NhbGUiOjEsInJlYWxtIjoicG9lMiJ9XQ/24accb4eec/Headhunter.png";
 
-    private readonly HttpClient _http;
+    private const string ChaosUrl = "https://web.poecdn.com/gen/image/WzI1LDE0LHsiZiI6IjJESXRlbXMvQ3VycmVuY3kvQ3VycmVuY3lSZXJvbGxSYXJlIiwic2NhbGUiOjEsInJlYWxtIjoicG9lMiJ9XQ/c0ca392a78/CurrencyRerollRare.png";
+
+
+	private readonly HttpClient _http;
     private readonly string _baseDir;
 
     public bool IsAvailable { get; private set; }
@@ -24,6 +27,9 @@ internal sealed class IconCache : IDisposable
     public Bitmap? Exalted { get; private set; }
     public Bitmap? Mirror { get; private set; }
     public Bitmap? Headhunter { get; private set; }
+
+    public Bitmap? Chaos { get; private set; }
+
 
     public IconCache(HttpClient http, string? baseDir = null)
     {
@@ -39,6 +45,7 @@ internal sealed class IconCache : IDisposable
             var exPath = Path.Combine(_baseDir, "exalted.png");
             var mirrorPath = Path.Combine(_baseDir, "mirror.png");
             var headhunterPath = Path.Combine(_baseDir, "headhunter.png");
+            var chaosPath = Path.Combine(_baseDir, "chaos.png");
 
             if (!File.Exists(divPath))
                 await DownloadAsync(DivineUrl, divPath);
@@ -48,11 +55,15 @@ internal sealed class IconCache : IDisposable
                 await DownloadAsync(MirrorUrl, mirrorPath);
             if (!File.Exists(headhunterPath))
                 await DownloadAsync(HeadhunterUrl, headhunterPath);
+            if (!File.Exists(chaosPath))
+                await DownloadAsync(ChaosUrl, chaosPath);
+                
 
             Divine = new Bitmap(divPath);
             Exalted = new Bitmap(exPath);
             Mirror = new Bitmap(mirrorPath);
             Headhunter = new Bitmap(headhunterPath);
+            Chaos = new Bitmap(chaosPath);
             IsAvailable = true;
         }
         catch (Exception ex)
@@ -74,9 +85,11 @@ internal sealed class IconCache : IDisposable
         Exalted?.Dispose();
         Mirror?.Dispose();
         Headhunter?.Dispose();
+        Chaos?.Dispose();
         Divine = null;
         Exalted = null;
         Mirror = null;
         Headhunter = null;
+        Chaos = null;
     }
 }
